@@ -63,7 +63,7 @@ def run_full_inference(
     print(f"  • Source 3 Test: {len(s3_test):,} entities")
 
     # 3. Build Multi-Index Blocker over Test Target Pool (S2 + S3)
-    blocker = MultiIndexBlocker(max_candidates=15, max_token_freq=5000)
+    blocker = MultiIndexBlocker(max_candidates=35, max_token_freq=35000)
     blocker.fit(s2_test, s3_test)
 
     # 4. Register Datasets in FeatureExtractor Lookup

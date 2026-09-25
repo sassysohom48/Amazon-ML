@@ -27,7 +27,7 @@ def main():
     cand_pairs_path = PROCESSED_DIR / "val_candidate_pairs.parquet"
     if not cand_pairs_path.exists():
         print("\n--- STEP 1: VALIDATION BLOCKING ---")
-        benchmark_validation_blocking(max_candidates=15)
+        benchmark_validation_blocking(max_candidates=35, max_token_freq=35000)
     else:
         print(f"\n[Found] Existing validation candidates at {cand_pairs_path.name}.")
 
