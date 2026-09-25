@@ -62,10 +62,10 @@ VAL_FRACTION = 0.10
 RANDOM_SEED = 42
 
 # Candidate Generation & Blocking Settings
-MAX_CANDIDATES_PER_S1 = 25
+MAX_CANDIDATES_PER_S1 = 35
 MINHASH_NUM_PERM = 64
 MINHASH_THRESHOLD = 0.35
-BM25_TOP_K = 15
+BM25_TOP_K = 20
 
 # Evaluation & Thresholding
 BETA = 0.5  # F_0.5 metric: precision weighted 2x over recall

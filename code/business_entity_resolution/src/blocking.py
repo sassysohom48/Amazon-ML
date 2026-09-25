@@ -1,7 +1,7 @@
 """
-High-Recall Hybrid Candidate Generation & Blocking Engine (Amazon ML Challenge 2026).
-Combines Inverted Token Index (BM25/TF-IDF), Compound Name Prefix Keys,
-Character 4-Gram Overlap, and Address Anchors strictly partitioned by country.
+Dual-Pass High-Recall Hybrid Candidate Blocking Engine (Amazon ML Challenge 2026).
+Combines Inverted Token Indexing (BM25/IDF), Canonical Sorted-Token Keys,
+Address Locality Anchors, and Targeted Fuzzy Fallback partitioned strictly by country.
 """
 
 import math
@@ -19,7 +19,7 @@ from .config import (
 )
 from .normalizer import (
     clean_text, extract_informative_tokens,
-    extract_name_prefix_key, extract_char_4grams,
+    extract_sorted_token_key, extract_char_4grams,
     extract_address_anchors
 )
 from .evaluator import evaluate_blocking_recall
@@ -27,8 +27,8 @@ from .evaluator import evaluate_blocking_recall
 
 class HighRecallCountryIndex:
     """
-    Production-grade in-memory multi-channel inverted index for candidate blocking.
-    Optimized for high candidate recall (>95%) and low memory footprint using array buffers.
+    Dual-Pass in-memory candidate generator optimized for high recall (>=95%)
+    and rapid query throughput (>2,000 entities/sec).
     """
 
     def __init__(self, country: str, max_candidates: int = MAX_CANDIDATES_PER_S1):
@@ -38,9 +38,9 @@ class HighRecallCountryIndex:
         # Target ID registry
         self.target_ids: List[str] = []
 
-        # Inverted index channels (stored as compact unsigned int arrays)
+        # Compact unsigned integer posting lists
         self.token_postings: Dict[str, array] = defaultdict(lambda: array("I"))
-        self.prefix_postings: Dict[str, array] = defaultdict(lambda: array("I"))
+        self.sorted_key_postings: Dict[str, array] = defaultdict(lambda: array("I"))
         self.anchor_postings: Dict[str, array] = defaultdict(lambda: array("I"))
         self.ngram_postings: Dict[str, array] = defaultdict(lambda: array("I"))
 
@@ -50,7 +50,7 @@ class HighRecallCountryIndex:
 
     def fit_target_pool(self, df_s2: pl.DataFrame, df_s3: pl.DataFrame) -> None:
         """
-        Indexes all S2 + S3 target entities across multiple blocking channels.
+        Indexes all S2 + S3 target entities across sorted keys, tokens, and address anchors.
         """
         start_time = time.time()
         print(f"\n[{self.country}] Indexing Target Records (S2 + S3)...")
@@ -73,30 +73,30 @@ class HighRecallCountryIndex:
             c_name = clean_text(raw_names[idx])
             c_addr = clean_text(raw_addrs[idx])
 
-            # Channel 1: Distinctive Name Tokens
+            # Channel 1: Canonical Sorted-Token Key (Word-Order Inversion Invariant)
+            sorted_key = extract_sorted_token_key(c_name, max_tokens=3)
+            if sorted_key:
+                self.sorted_key_postings[sorted_key].append(idx)
+
+            # Channel 2: Distinctive Name Tokens
             tokens = set(extract_informative_tokens(c_name))
             for tok in tokens:
                 self.token_postings[tok].append(idx)
                 token_df_count[tok] += 1
 
-            # Channel 2: Compound Name Prefix (e.g. 'orelee_barbershop')
-            prefix_key = extract_name_prefix_key(c_name, n_tokens=2)
-            if prefix_key:
-                self.prefix_postings[prefix_key].append(idx)
-
-            # Channel 3: Address Anchors (e.g. '1795_westchester')
+            # Channel 3: Address Locality & PIN Anchors
             if c_addr:
                 anchors = set(extract_address_anchors(c_addr))
                 for anchor in anchors:
                     self.anchor_postings[anchor].append(idx)
 
-            # Channel 4: Character 4-Grams
+            # Channel 4: Character 4-Grams (indexed for fallback)
             ngrams = extract_char_4grams(c_name)
             for ng in ngrams:
                 self.ngram_postings[ng].append(idx)
                 ngram_df_count[ng] += 1
 
-        # Compute BM25 IDF weights for tokens: ln(1 + (N - df + 0.5) / (df + 0.5))
+        # Compute BM25 IDF weights for tokens
         for tok, df_val in token_df_count.items():
             self.token_idf[tok] = math.log(1.0 + (n_targets - df_val + 0.5) / (df_val + 0.5))
 
@@ -106,7 +106,7 @@ class HighRecallCountryIndex:
 
         elapsed = time.time() - start_time
         print(f"[{self.country}] Indexed {n_targets:,} target records in {elapsed:.2f}s "
-              f"({len(self.token_postings):,} tokens, {len(self.prefix_postings):,} prefixes, "
+              f"({len(self.sorted_key_postings):,} sorted keys, {len(self.token_postings):,} tokens, "
               f"{len(self.anchor_postings):,} address anchors, {len(self.ngram_postings):,} 4-grams)")
 
     def generate_candidates_for_s1(
@@ -114,7 +114,9 @@ class HighRecallCountryIndex:
         df_s1: pl.DataFrame
     ) -> Dict[str, List[str]]:
         """
-        Queries all channels to generate high-recall candidate lists for every S1 entity.
+        Executes dual-pass high-speed candidate retrieval:
+        Pass 1: Sorted Key + Distinctive Tokens + Address Locality Anchors.
+        Pass 2: Fuzzy 4-Gram fallback only for sparse entities (< 5 candidates).
         """
         start_time = time.time()
         n_s1 = df_s1.height
@@ -125,9 +127,7 @@ class HighRecallCountryIndex:
         s1_addrs = df_s1["business_address"].to_list()
 
         results: Dict[str, List[str]] = {}
-
-        # Max posting length threshold to prevent ultra-generic words from polluting candidate sets
-        max_posting_len = 15000
+        max_token_posting_len = 25000
 
         for i in range(n_s1):
             s1_id = s1_ids[i]
@@ -136,15 +136,16 @@ class HighRecallCountryIndex:
 
             candidate_scores: Dict[int, float] = defaultdict(float)
 
-            # Channel 1: Exact Compound Name Prefix Lookup (+10.0 boost)
-            prefix_key = extract_name_prefix_key(c_name, n_tokens=2)
-            if prefix_key:
-                pref_targets = self.prefix_postings.get(prefix_key)
+            # --- PASS 1: High Precision Channels ---
+            # 1. Canonical Sorted Token Key (+12.0 match bonus)
+            sorted_key = extract_sorted_token_key(c_name, max_tokens=3)
+            if sorted_key:
+                pref_targets = self.sorted_key_postings.get(sorted_key)
                 if pref_targets and len(pref_targets) <= 5000:
                     for t_idx in pref_targets:
-                        candidate_scores[t_idx] += 10.0
+                        candidate_scores[t_idx] += 12.0
 
-            # Channel 2: Address Anchor Matching (+8.0 boost)
+            # 2. Address Anchors (+8.0 match bonus)
             if c_addr:
                 anchors = extract_address_anchors(c_addr)
                 for anchor in anchors:
@@ -153,38 +154,38 @@ class HighRecallCountryIndex:
                         for t_idx in anc_targets:
                             candidate_scores[t_idx] += 8.0
 
-            # Channel 3: Distinctive Name Token Scoring (IDF weighted)
+            # 3. Informative Name Tokens (IDF Weighted)
             tokens = extract_informative_tokens(c_name)
             for tok in tokens:
                 idf = self.token_idf.get(tok, 1.0)
                 targets = self.token_postings.get(tok)
-                if targets and len(targets) <= max_posting_len:
+                if targets and len(targets) <= max_token_posting_len:
                     weight = idf * 2.5
                     for t_idx in targets:
                         candidate_scores[t_idx] += weight
 
-            # Channel 4: Character 4-Grams (Typo & Transliteration Resilience)
-            ngrams = extract_char_4grams(c_name)
-            for ng in ngrams:
-                ng_targets = self.ngram_postings.get(ng)
-                if ng_targets and len(ng_targets) <= 3000:
-                    idf_g = self.ngram_idf.get(ng, 1.0)
-                    weight = idf_g * 0.4
-                    for t_idx in ng_targets:
-                        candidate_scores[t_idx] += weight
+            # --- PASS 2: Targeted Fuzzy 4-Gram Fallback (only for sparse entities) ---
+            if len(candidate_scores) < 5:
+                ngrams = extract_char_4grams(c_name)
+                for ng in ngrams:
+                    ng_targets = self.ngram_postings.get(ng)
+                    if ng_targets and len(ng_targets) <= 3000:
+                        idf_g = self.ngram_idf.get(ng, 1.0)
+                        weight = idf_g * 0.5
+                        for t_idx in ng_targets:
+                            candidate_scores[t_idx] += weight
 
             if not candidate_scores:
                 results[s1_id] = []
                 continue
 
-            # Take Top-K candidates sorted by cumulative multi-channel score
+            # Take Top-K candidates sorted by cumulative score
             top_targets = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)[:self.max_candidates]
             results[s1_id] = [self.target_ids[t_idx] for t_idx, _ in top_targets]
 
         elapsed = time.time() - start_time
         print(f"[{self.country}] Candidates generated in {elapsed:.2f}s ({n_s1 / max(elapsed, 0.001):,.0f} entities/s)")
         return results
-
 
 
 def candidates_dict_to_dataframe(cand_dict: Dict[str, List[str]]) -> pl.DataFrame:
@@ -209,11 +210,11 @@ def run_blocking_pipeline(evaluate_on_val: bool = True) -> None:
     """
     start_total = time.time()
     print("=" * 70)
-    print("  AMAZON ML CHALLENGE 2026: PHASE 2 CANDIDATE BLOCKING (HIGH RECALL)")
+    print("  AMAZON ML CHALLENGE 2026: PHASE 2 CANDIDATE BLOCKING (DUAL-PASS)")
     print("=" * 70)
 
     if evaluate_on_val:
-        print("\n--- Running Candidate Blocking on Validation Set ---")
+        print("\n--- Running Dual-Pass Candidate Blocking on Validation Set ---")
         val_s1_path = PROCESSED_DIR / "val_source1.parquet"
         val_gt_path = PROCESSED_DIR / "val_ground_truth.parquet"
 
