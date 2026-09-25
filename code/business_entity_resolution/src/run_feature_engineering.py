@@ -47,15 +47,12 @@ def run_phase_4_feature_engineering(
         print("Running candidate blocking to generate training candidates...")
         benchmark_validation_blocking(max_candidates=35, max_token_freq=35000)
 
-    # 3. Load datasets
-    print("\nLoading preprocessed datasets...")
+    # 3. Load Ground Truth & Candidate Pool
+    print("\nLoading Ground Truth and candidate blocking pairs...")
     t0 = time.time()
-    val_s1 = pl.read_parquet(val_s1_path)
-    train_s2 = pl.read_parquet(train_s2_path)
-    train_s3 = pl.read_parquet(train_s3_path)
     val_gt = pl.read_parquet(val_gt_path)
     cand_df = pl.read_parquet(cand_pairs_path)
-    print(f"Loaded datasets in {time.time() - t0:.2f}s.")
+    print(f"Loaded validation pairs in {time.time() - t0:.2f}s.")
 
     # 4. Build Ground Truth lookup set
     print("\nIndexing Ground Truth true match pairs...")
@@ -70,16 +67,8 @@ def run_phase_4_feature_engineering(
 
     print(f"Total True Positive Pairs in Validation GT: {len(gt_pairs):,}")
 
-    # 5. Populate FeatureExtractor Cache
-    print("Registering entity records into FeatureExtractor cache...")
-    extractor = FeatureExtractor()
-    extractor.register_dataset(val_s1)
-    extractor.register_dataset(train_s2)
-    extractor.register_dataset(train_s3)
-    print(f"Cached {len(extractor.entity_lookup):,} entities for O(1) attribute lookup.")
-
-    # 6. Mine Positives and Hard Negatives from Blocker Candidates
-    print("Mining Positives and Hard Negatives from candidate pool...")
+    # 5. Mine Positives and Hard Negatives from Blocker Candidates
+    print("\nMining Positives and Hard Negatives from candidate pool...")
     pos_pairs: List[Tuple[str, str]] = []
     neg_pairs: List[Tuple[str, str]] = []
 
@@ -102,7 +91,7 @@ def run_phase_4_feature_engineering(
 
     print(f"Candidate pool composition: {len(pos_pairs):,} Positives (True Matches), {len(neg_pairs):,} Hard Negatives.")
 
-    # 7. Balanced Subsampling
+    # 6. Balanced Subsampling
     n_pos = min(len(pos_pairs), max_samples // (1 + neg_to_pos_ratio))
     n_neg = min(len(neg_pairs), n_pos * neg_to_pos_ratio)
 
@@ -128,6 +117,22 @@ def run_phase_4_feature_engineering(
     shuffle_order = np.random.permutation(len(all_pairs))
     shuffled_pairs = [all_pairs[i] for i in shuffle_order]
     shuffled_labels = [all_labels[i] for i in shuffle_order]
+
+    # 7. Fast Selective Entity Registration
+    needed_s1 = pl.Series("id", list({p[0] for p in shuffled_pairs}))
+    needed_tgt = pl.Series("id", list({p[1] for p in shuffled_pairs}))
+    print(f"\nLoading entity attributes for {len(needed_s1) + len(needed_tgt):,} active entities...")
+    t_reg = time.time()
+    
+    val_s1 = pl.read_parquet(val_s1_path).filter(pl.col("entity_id").is_in(needed_s1))
+    train_s2 = pl.read_parquet(train_s2_path).filter(pl.col("entity_id").is_in(needed_tgt))
+    train_s3 = pl.read_parquet(train_s3_path).filter(pl.col("entity_id").is_in(needed_tgt))
+
+    extractor = FeatureExtractor()
+    extractor.register_dataset(val_s1)
+    extractor.register_dataset(train_s2)
+    extractor.register_dataset(train_s3)
+    print(f"Cached {len(extractor.entity_lookup):,} entities for O(1) attribute lookup in {time.time() - t_reg:.2f}s.")
 
     # 8. Extract 27-Dimensional RapidFuzz Features
     print(f"\nExtracting 27 RapidFuzz similarity features for {len(shuffled_pairs):,} pairs...")

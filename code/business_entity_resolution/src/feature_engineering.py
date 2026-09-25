@@ -152,10 +152,10 @@ class FeatureExtractor:
     def __init__(self):
         self.entity_lookup: Dict[str, Tuple[str, str, set, set, set, set]] = {}
 
-    def register_dataset(self, df: pl.DataFrame):
+    def register_dataset(self, df: pl.DataFrame, needed_eids: Optional[Set[str]] = None):
         """
         Registers a Polars DataFrame into the fast attribute lookup dictionary.
-        DataFrame must contain: entity_id, name_clean, address_clean, name_tokens, postal_digits.
+        If needed_eids is provided, only registers rows whose entity_id is in needed_eids.
         """
         eids = df["entity_id"].to_list()
         names = df["name_clean"].to_list()
@@ -167,6 +167,9 @@ class FeatureExtractor:
         digit_pattern = re.compile(r"\b\d+\b")
 
         for eid, name, addr, tok_str, post_str in zip(eids, names, addrs, tokens, postals):
+            if needed_eids is not None and eid not in needed_eids:
+                continue
+
             name_str = name if name else ""
             addr_str = addr if addr else ""
             name_tok_set = set(tok_str.split()) if tok_str else set()
