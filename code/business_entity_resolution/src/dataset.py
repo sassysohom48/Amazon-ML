@@ -1,95 +1,72 @@
 """
-Dataset and Validation Splitting Module (Amazon ML Challenge 2026).
-Implements fast Polars loading, stratified validation splitting, and pair sampling.
+Dataset Utilities & Fast In-Memory Data Access (Amazon ML Challenge 2026).
+Provides fast Polars-based streaming and dict loading for downstream blocking,
+feature engineering, training, and evaluation pipelines.
 """
 
-import os
 from pathlib import Path
-from typing import Dict, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
 import polars as pl
 
 from .config import (
+    PARQUET_DIR, PROCESSED_DIR,
     TRAIN_S1, TRAIN_S2, TRAIN_S3, TRAIN_GT,
-    TEST_S1, TEST_S2, TEST_S3,
-    PROCESSED_DIR, VAL_FRACTION, RANDOM_SEED
+    TEST_S1, TEST_S2, TEST_S3
 )
 
 
-def load_ground_truth(gt_path: Path) -> Dict[str, Set[str]]:
+def load_ground_truth(gt_input: Path) -> Dict[str, Set[str]]:
     """
-    Load ground truth TSV into an in-memory mapping:
+    Loads ground truth mapping from Parquet or TSV:
     source1_entity_id -> set of matched entity IDs.
     """
-    print(f"Loading ground truth from {gt_path}...")
-    gt_df = pl.read_csv(gt_path, separator="\t", has_header=True)
+    if str(gt_input).endswith(".parquet"):
+        df_gt = pl.read_parquet(gt_input)
+    else:
+        df_gt = pl.read_csv(gt_input, separator="\t", has_header=True, quote_char=None)
+
     gt_map: Dict[str, Set[str]] = {}
-    for row in gt_df.iter_rows():
-        s1_id, matched = row[0], row[1]
+    for row in df_gt.iter_rows():
+        s1_id, matched = str(row[0]).strip(), row[1]
         if matched and str(matched).strip():
             gt_map[s1_id] = set(str(matched).strip().split(","))
         else:
             gt_map[s1_id] = set()
-    print(f"Loaded ground truth for {len(gt_map):,} S1 entities.")
     return gt_map
 
 
-def create_validation_split(
-    val_fraction: float = VAL_FRACTION,
-    random_seed: int = RANDOM_SEED,
-    output_dir: Path = PROCESSED_DIR
-) -> Tuple[Path, Path]:
+def load_parquet_table(
+    table_name: str,
+    country: Optional[str] = None,
+    columns: Optional[List[str]] = None
+) -> pl.DataFrame:
     """
-    Creates a stratified 10% holdout validation split from train_source1.tsv
-    stratified by country, and saves partitioned parquet files.
+    Loads a specific source table from Parquet, optionally filtered by country partition.
+    
+    Args:
+        table_name: e.g. "train_source1", "train_source2", "test_source1", etc.
+        country: e.g. "US", "INDIA", "FRANCE"
+        columns: list of columns to load (e.g. ['entity_id', 'business_name'])
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    val_s1_path = output_dir / "val_source1.parquet"
-    train_s1_path = output_dir / "train_source1_split.parquet"
-    val_gt_path = output_dir / "val_ground_truth.parquet"
-    train_gt_path = output_dir / "train_ground_truth_split.parquet"
+    if country:
+        country_clean = country.strip().upper()
+        path = PARQUET_DIR / f"{table_name}_country={country_clean}.parquet"
+    else:
+        path = PARQUET_DIR / f"{table_name}_all.parquet"
 
-    if val_s1_path.exists() and train_s1_path.exists():
-        print(f"Validation split already exists at {val_s1_path}")
-        return val_s1_path, train_s1_path
+    if not path.exists():
+        raise FileNotFoundError(f"Parquet table not found at {path}. Run Step 1 ingestion first.")
 
-    print(f"Reading {TRAIN_S1} with Polars...")
-    df_s1 = pl.read_csv(TRAIN_S1, separator="\t", has_header=True)
-    print(f"Total S1 records: {len(df_s1):,}")
-
-    # Stratified sampling by country
-    val_dfs = []
-    train_dfs = []
-    for country in df_s1["country"].unique().to_list():
-        subset = df_s1.filter(pl.col("country") == country)
-        shuffled = subset.sample(fraction=1.0, shuffle=True, seed=random_seed)
-        n_val = int(len(subset) * val_fraction)
-        val_dfs.append(shuffled.slice(0, n_val))
-        train_dfs.append(shuffled.slice(n_val))
-
-    df_val_s1 = pl.concat(val_dfs)
-    df_train_s1 = pl.concat(train_dfs)
-
-    print(f"Validation S1: {len(df_val_s1):,} rows (Countries: {df_val_s1['country'].value_counts().to_dicts()})")
-    print(f"Train S1 Split: {len(df_train_s1):,} rows (Countries: {df_train_s1['country'].value_counts().to_dicts()})")
-
-    # Save S1 splits
-    df_val_s1.write_parquet(val_s1_path)
-    df_train_s1.write_parquet(train_s1_path)
-
-    # Split Ground Truth
-    print(f"Reading {TRAIN_GT}...")
-    df_gt = pl.read_csv(TRAIN_GT, separator="\t", has_header=True)
-    val_s1_set = set(df_val_s1["entity_id"].to_list())
-
-    df_val_gt = df_gt.filter(pl.col("source1_entity_id").is_in(val_s1_set))
-    df_train_gt = df_gt.filter(~pl.col("source1_entity_id").is_in(val_s1_set))
-
-    df_val_gt.write_parquet(val_gt_path)
-    df_train_gt.write_parquet(train_gt_path)
-
-    print("Validation split successfully created and saved to Parquet!")
-    return val_s1_path, train_s1_path
+    if columns:
+        return pl.read_parquet(path, columns=columns)
+    return pl.read_parquet(path)
 
 
-if __name__ == "__main__":
-    create_validation_split()
+def get_available_countries(source_name: str = "train_source1") -> List[str]:
+    """Returns all available country partition keys for a given table."""
+    matching_files = list(PARQUET_DIR.glob(f"{source_name}_country=*.parquet"))
+    countries = []
+    for f in matching_files:
+        country = f.stem.split("country=")[-1]
+        countries.append(country)
+    return sorted(countries)
