@@ -6,7 +6,7 @@ between S1 entities and candidate S2/S3 records using C++ accelerated RapidFuzz.
 
 import time
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 import numpy as np
 import polars as pl
 from rapidfuzz import fuzz, distance
