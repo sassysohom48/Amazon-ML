@@ -148,19 +148,25 @@ Amazon-ML/
 
 ---
 
-### Phase 2 — High-Speed Text Preprocessing & Parquet Conversion (Local) `[IN PROGRESS ⏳]`
+### Phase 2 — High-Speed Text Preprocessing & Parquet Conversion (Local) `[COMPLETED ✅]`
 
-Implement `text_normalizer.py` and run locally or via SageMaker Processing Job:
+* **Multilingual Preprocessing Pipeline Built & Executed:**
+  * Implemented `text_normalizer.py` and `preprocess_datasets.py` with multi-core batch chunking across all 12 CPU cores.
+  * Processed all **24,229,173 records** in under $24\text{ minutes}$ ($\sim 25,000\text{ rows/s}$).
+* **Preprocessed Dataset Outputs (`dataset/processed/`):**
+  * `train_source1_cleaned.parquet`: **2,206,821** rows ($293.20\text{ MB}$)
+  * `train_source2_cleaned.parquet`: **5,034,616** rows ($684.59\text{ MB}$)
+  * `train_source3_cleaned.parquet`: **5,285,603** rows ($713.72\text{ MB}$)
+  * `test_source1_cleaned.parquet`: **1,732,544** rows ($234.04\text{ MB}$, US, India, France)
+  * `test_source2_cleaned.parquet`: **4,887,273** rows ($682.74\text{ MB}$)
+  * `test_source3_cleaned.parquet`: **5,082,316** rows ($696.60\text{ MB}$)
+  * `val_source1_cleaned.parquet`: **220,681** validation rows ($29.45\text{ MB}$)
+* **Enriched Column Schema:**
+  * `entity_id`, `country`, `business_name_raw`, `business_address_raw`, `name_clean`, `addr_clean`, `name_tokens`, `core_stem`, `postal_digits`, `has_address`.
 
-1. **Multilingual Text Normalization:**
-   * **Unicode & Diacritic Stripping:** `unicodedata.normalize('NFKD', ...)` to handle French diacritics (`é` $\rightarrow$ `e`, `ô` $\rightarrow$ `o`) and Hindi Romanization.
-   * **Legal Suffix Standardization:** Unified mapping for `corp`, `inc`, `pvt ltd`, `llc`, and French legal forms (`sarl`, `sa`, `sas`).
-   * **Address Term Standardization:** Standardize street indicators (`st`, `rd`, `ave`, `blvd`, `ln`, `rue`), state codes (`TX` $\leftrightarrow$ `Texas`, `VA` $\leftrightarrow$ `Virginia`), and clean landmark noise.
-   * **Missing Address Flag:** Flag the $\sim 3.3\%$ records in S2/S3 with empty address (`has_address = 0`) to route through high-precision name matching.
-2. **Parquet Conversion with Snappy Compression:**
-   * Convert TSVs into partitioned Parquet files by `country` (`country=US`, `country=India`, `country=France`).
-   * Saves $>70\%$ I/O overhead and enables memory-mapped streaming in Polars.
-   * Sync processed Parquet to `s3://amazon-ml-2026-<team-name>/processed/`.
+---
+
+### Phase 3 — High-Recall Multi-Index Blocking Engine (Local / AWS) `[READY TO START ⏳]`
 
 ---
 
@@ -308,11 +314,12 @@ if __name__ == "__main__":
 | Milestone | Key Deliverables & Objective | Target Success Metric | Status |
 | :--- | :--- | :--- | :---: |
 | **M1: Foundation & Local Validation** | • Configured S3 bucket & data lake layout<br>• Installed core dependencies (`polars`, `lightgbm`, `rapidfuzz`)<br>• Generated stratified 10% validation split (220k S1 entities)<br>• Implemented macro $F_{0.5}$ evaluation harness | Local scoring harness operational & splits saved | **`DONE ✅`** |
-| **M2: Preprocessing & High-Recall Blocker** | • Multilingual text normalizer (US, India, France)<br>• Implement country partition + 5-key multi-index blocker<br>• Test candidate recall on local 10% validation split | Candidate Recall $\ge 98.5\%$, Avg candidates/S1 $\le 12$ | **`IN PROGRESS ⏳`** |
-| **M3: Feature Engineering Engine** | • Compute RapidFuzz, TF-IDF cosine, and structural features<br>• Generate $(X, y)$ pairwise training matrix | $>25$ discriminative features computed | `PENDING ⚪` |
-| **M4: Model Training & Tuning (AWS/Local)** | • Train LightGBM classifier with hard negative mining<br>• Optimize threshold $\theta^*$ on validation macro $F_{0.5}$ | Validation Macro $F_{0.5} \ge 0.85+$ | `PENDING ⚪` |
-| **M5: Full Test Inference (AWS)** | • Batch stream test inference across US, India, France<br>• Generate `matching_results.tsv` and `candidate_pairs.tsv` | $1,732,544$ rows produced in $<15\text{ mins}$ | `PENDING ⚪` |
-| **M6: Verification & Package** | • Run `validate_submission.py` with `--check-ids`<br>• Fill `Documentation_template.md`<br>• Create final submission zip | `validate_submission.py`: **PASS** | `PENDING ⚪` |
+| **M2: Preprocessing & Parquet Conversion** | • Multilingual text normalizer (US, India, France)<br>• Multi-core preprocessing across 24.2M records<br>• Generated Snappy-compressed Parquet datasets | All 24.2M records cleaned & saved in 3.46 GB Parquet | **`DONE ✅`** |
+| **M3: High-Recall Blocker** | • Country partition + 5-key multi-index candidate generator<br>• Evaluate candidate recall on 10% validation split | Candidate Recall $\ge 98.5\%$, Avg candidates/S1 $\le 12$ | **`READY TO START ⏳`** |
+| **M4: Feature Engineering Engine** | • Compute RapidFuzz, TF-IDF cosine, and structural features<br>• Generate $(X, y)$ pairwise training matrix | $>25$ discriminative features computed | `PENDING ⚪` |
+| **M5: Model Training & Tuning (AWS/Local)** | • Train LightGBM classifier with hard negative mining<br>• Optimize threshold $\theta^*$ on validation macro $F_{0.5}$ | Validation Macro $F_{0.5} \ge 0.85+$ | `PENDING ⚪` |
+| **M6: Full Test Inference (AWS)** | • Batch stream test inference across US, India, France<br>• Generate `matching_results.tsv` and `candidate_pairs.tsv` | $1,732,544$ rows produced in $<15\text{ mins}$ | `PENDING ⚪` |
+| **M7: Verification & Package** | • Run `validate_submission.py` with `--check-ids`<br>• Fill `Documentation_template.md`<br>• Create final submission zip | `validate_submission.py`: **PASS** | `PENDING ⚪` |
 
 ---
 

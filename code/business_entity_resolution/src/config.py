@@ -8,11 +8,17 @@ from pathlib import Path
 
 # Base Directories
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # Amazon-ML/
-DATASET_DIR = PROJECT_ROOT / "dataset" / "dataset"
-TRAIN_DIR = DATASET_DIR / "train"
-TEST_DIR = DATASET_DIR / "test"
+DATASET_DIR = PROJECT_ROOT / "dataset"
+RAW_DIR = DATASET_DIR / "raw"
+TRAIN_DIR = RAW_DIR / "train"
+TEST_DIR = RAW_DIR / "test"
 OUTPUT_DIR = PROJECT_ROOT / "output"
-PROCESSED_DIR = PROJECT_ROOT / "dataset" / "processed"
+PROCESSED_DIR = DATASET_DIR / "processed"
+
+# Fallback check if raw folder exists or direct train folder
+if not TRAIN_DIR.exists() and (DATASET_DIR / "train").exists():
+    TRAIN_DIR = DATASET_DIR / "train"
+    TEST_DIR = DATASET_DIR / "test"
 
 # Ensure output and processed dirs exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

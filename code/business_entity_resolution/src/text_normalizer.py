@@ -1,82 +1,81 @@
 """
 Multilingual Text Normalization & Cleaning Module (Amazon ML Challenge 2026).
-Handles diacritic normalization, legal suffix standardization, address component
-cleaning, and token extraction for US, India, and France entities.
+Optimized for high-speed multi-core batch processing across millions of entities.
 """
 
 import re
 import unicodedata
 from typing import List, Tuple, Optional, Set
 
-# Legal suffix mapping for standardization across English and French entities
-LEGAL_SUFFIX_MAP = {
+# Pre-compiled Legal Suffix Regexes
+LEGAL_PATTERNS = [
     # English / US / India
-    r"\bincorporated\b": "inc",
-    r"\binc\b\.?": "inc",
-    r"\bcorporation\b": "corp",
-    r"\bcorp\b\.?": "corp",
-    r"\bcompany\b": "co",
-    r"\bco\b\.?": "co",
-    r"\blimited liability company\b": "llc",
-    r"\bllc\b\.?": "llc",
-    r"\bl\.l\.c\b\.?": "llc",
-    r"\bprivate limited\b": "pvt ltd",
-    r"\bpvt\b\.?\s*\bltd\b\.?": "pvt ltd",
-    r"\bp\b\.?\s*\bltd\b\.?": "pvt ltd",
-    r"\blimited\b": "ltd",
-    r"\bltd\b\.?": "ltd",
-    r"\bpublic limited\b": "pub ltd",
-    r"\benterprises\b": "ent",
-    r"\benterprise\b": "ent",
-    r"\bservices\b": "svc",
-    r"\bservice\b": "svc",
-    r"\bassociates\b": "assoc",
-    r"\bassoc\b\.?": "assoc",
+    (re.compile(r"\bincorporated\b"), "inc"),
+    (re.compile(r"\binc\b\.?"), "inc"),
+    (re.compile(r"\bcorporation\b"), "corp"),
+    (re.compile(r"\bcorp\b\.?"), "corp"),
+    (re.compile(r"\bcompany\b"), "co"),
+    (re.compile(r"\bco\b\.?"), "co"),
+    (re.compile(r"\blimited liability company\b"), "llc"),
+    (re.compile(r"\bllc\b\.?"), "llc"),
+    (re.compile(r"\bl\.l\.c\b\.?"), "llc"),
+    (re.compile(r"\bprivate limited\b"), "pvt ltd"),
+    (re.compile(r"\bpvt\b\.?\s*\bltd\b\.?"), "pvt ltd"),
+    (re.compile(r"\bp\b\.?\s*\bltd\b\.?"), "pvt ltd"),
+    (re.compile(r"\blimited\b"), "ltd"),
+    (re.compile(r"\bltd\b\.?"), "ltd"),
+    (re.compile(r"\bpublic limited\b"), "pub ltd"),
+    (re.compile(r"\benterprises\b"), "ent"),
+    (re.compile(r"\benterprise\b"), "ent"),
+    (re.compile(r"\bservices\b"), "svc"),
+    (re.compile(r"\bservice\b"), "svc"),
+    (re.compile(r"\bassociates\b"), "assoc"),
+    (re.compile(r"\bassoc\b\.?"), "assoc"),
     # French Legal Forms
-    r"\bsociete anonyme\b": "sa",
-    r"\bs\.a\b\.?": "sa",
-    r"\bsarl\b\.?": "sarl",
-    r"\bs\.a\.r\.l\b\.?": "sarl",
-    r"\bsas\b\.?": "sas",
-    r"\bs\.a\.s\b\.?": "sas",
-    r"\beurl\b\.?": "eurl",
-    r"\bsci\b\.?": "sci",
-}
+    (re.compile(r"\bsociete anonyme\b"), "sa"),
+    (re.compile(r"\bs\.a\b\.?"), "sa"),
+    (re.compile(r"\bsarl\b\.?"), "sarl"),
+    (re.compile(r"\bs\.a\.r\.l\b\.?"), "sarl"),
+    (re.compile(r"\bsas\b\.?"), "sas"),
+    (re.compile(r"\bs\.a\.s\b\.?"), "sas"),
+    (re.compile(r"\beurl\b\.?"), "eurl"),
+    (re.compile(r"\bsci\b\.?"), "sci"),
+]
 
-# Address Road & Structure abbreviations
-ADDRESS_ABBREV_MAP = {
-    r"\bstreet\b": "st",
-    r"\bst\b\.?": "st",
-    r"\broad\b": "rd",
-    r"\brd\b\.?": "rd",
-    r"\bavenue\b": "ave",
-    r"\bave\b\.?": "ave",
-    r"\bboulevard\b": "blvd",
-    r"\bblvd\b\.?": "blvd",
-    r"\blane\b": "ln",
-    r"\bln\b\.?": "ln",
-    r"\bdrive\b": "dr",
-    r"\bdr\b\.?": "dr",
-    r"\bcourt\b": "ct",
-    r"\bct\b\.?": "ct",
-    r"\bhighway\b": "hwy",
-    r"\bhwy\b\.?": "hwy",
-    r"\bapartment\b": "apt",
-    r"\bapt\b\.?": "apt",
-    r"\bsuite\b": "ste",
-    r"\bste\b\.?": "ste",
-    r"\bfloor\b": "flr",
-    r"\bflr\b\.?": "flr",
-    r"\bnear\b": "near",
-    r"\bopposite\b": "opp",
-    r"\bopp\b\.?": "opp",
-    r"\bdoor no\b\.?": "no",
-    r"\bflat no\b\.?": "no",
-    r"\bh no\b\.?": "no",
-    r"\bhouse no\b\.?": "no",
-}
+# Pre-compiled Address Regexes
+ADDRESS_PATTERNS = [
+    (re.compile(r"\bstreet\b"), "st"),
+    (re.compile(r"\bst\b\.?"), "st"),
+    (re.compile(r"\broad\b"), "rd"),
+    (re.compile(r"\brd\b\.?"), "rd"),
+    (re.compile(r"\bavenue\b"), "ave"),
+    (re.compile(r"\bave\b\.?"), "ave"),
+    (re.compile(r"\bboulevard\b"), "blvd"),
+    (re.compile(r"\bblvd\b\.?"), "blvd"),
+    (re.compile(r"\blane\b"), "ln"),
+    (re.compile(r"\bln\b\.?"), "ln"),
+    (re.compile(r"\bdrive\b"), "dr"),
+    (re.compile(r"\bdr\b\.?"), "dr"),
+    (re.compile(r"\bcourt\b"), "ct"),
+    (re.compile(r"\bct\b\.?"), "ct"),
+    (re.compile(r"\bhighway\b"), "hwy"),
+    (re.compile(r"\bhwy\b\.?"), "hwy"),
+    (re.compile(r"\bapartment\b"), "apt"),
+    (re.compile(r"\bapt\b\.?"), "apt"),
+    (re.compile(r"\bsuite\b"), "ste"),
+    (re.compile(r"\bste\b\.?"), "ste"),
+    (re.compile(r"\bfloor\b"), "flr"),
+    (re.compile(r"\bflr\b\.?"), "flr"),
+    (re.compile(r"\bnear\b"), "near"),
+    (re.compile(r"\bopposite\b"), "opp"),
+    (re.compile(r"\bopp\b\.?"), "opp"),
+    (re.compile(r"\bdoor no\b\.?"), "no"),
+    (re.compile(r"\bflat no\b\.?"), "no"),
+    (re.compile(r"\bh no\b\.?"), "no"),
+    (re.compile(r"\bhouse no\b\.?"), "no"),
+]
 
-# Stopwords for candidate blocking (words that appear too frequently to be distinctive)
+# Stopwords for candidate blocking
 NAME_STOPWORDS = {
     "the", "a", "an", "and", "of", "in", "for", "on", "at", "by", "to", "with",
     "inc", "corp", "co", "llc", "ltd", "pvt", "sa", "sarl", "sas", "company",
@@ -85,71 +84,103 @@ NAME_STOPWORDS = {
     "india", "usa", "us", "france"
 }
 
+RE_NON_ALPHANUM = re.compile(r"[^a-z0-9\s]")
+RE_WHITESPACE = re.compile(r"\s+")
+RE_DIGITS = re.compile(r"\b\d{3,6}\b")
+
 
 def strip_accents_and_normalize(text: str) -> str:
     """Strip Unicode accents and normalize characters to ascii-compatible form."""
     if not text:
         return ""
-    # Normalize unicode to decomposed form and remove non-spacing marks
     normalized = unicodedata.normalize("NFKD", text)
-    stripped = "".join(c for c in normalized if not unicodedata.combining(c))
-    return stripped.lower()
+    return "".join(c for c in normalized if not unicodedata.combining(c)).lower()
 
 
 def clean_text_basic(text: str) -> str:
     """Basic text cleanup: replace punctuation with spaces and collapse whitespace."""
     if not text or not str(text).strip():
         return ""
-    text = str(text)
-    # Replace & with and, @ with at
-    text = text.replace("&", " and ").replace("@", " at ")
-    # Strip diacritics and lowercase
+    text = str(text).replace("&", " and ").replace("@", " at ")
     text = strip_accents_and_normalize(text)
-    # Replace non-alphanumeric characters with space
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    # Collapse multiple whitespaces
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    text = RE_NON_ALPHANUM.sub(" ", text)
+    return RE_WHITESPACE.sub(" ", text).strip()
 
 
 def normalize_business_name(name: str) -> str:
-    """Full normalization for business name."""
+    """Full normalization for business name with legal suffix standardization."""
     clean = clean_text_basic(name)
     if not clean:
         return ""
-    # Apply legal suffix standardization
-    for pattern, replacement in LEGAL_SUFFIX_MAP.items():
-        clean = re.sub(pattern, replacement, clean)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return clean
+    for pattern, replacement in LEGAL_PATTERNS:
+        clean = pattern.sub(replacement, clean)
+    return RE_WHITESPACE.sub(" ", clean).strip()
 
 
 def normalize_business_address(address: str) -> str:
-    """Full normalization for business address."""
+    """Full normalization for business address with abbreviation standardization."""
     clean = clean_text_basic(address)
     if not clean:
         return ""
-    # Apply address abbreviation standardization
-    for pattern, replacement in ADDRESS_ABBREV_MAP.items():
-        clean = re.sub(pattern, replacement, clean)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return clean
+    for pattern, replacement in ADDRESS_PATTERNS:
+        clean = pattern.sub(replacement, clean)
+    return RE_WHITESPACE.sub(" ", clean).strip()
 
 
-def extract_informative_tokens(name_clean: str, min_len: int = 3) -> List[str]:
-    """Extract distinct, non-stopword tokens from cleaned business name."""
-    tokens = name_clean.split()
-    return [t for t in tokens if len(t) >= min_len and t not in NAME_STOPWORDS]
+def extract_informative_tokens(name_clean: str, min_len: int = 3) -> str:
+    """Extract distinct, non-stopword tokens as space-separated string."""
+    tokens = [t for t in name_clean.split() if len(t) >= min_len and t not in NAME_STOPWORDS]
+    # Keep unique in order
+    seen = set()
+    unique_tokens = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            unique_tokens.append(t)
+    return " ".join(unique_tokens)
 
 
 def extract_core_name_prefix(name_clean: str, n_tokens: int = 2) -> str:
-    """Extract first n significant tokens as a core blocking prefix."""
+    """Extract first n significant tokens as a core blocking stem."""
     tokens = [t for t in name_clean.split() if t not in NAME_STOPWORDS]
     return " ".join(tokens[:n_tokens]) if tokens else name_clean[:10]
 
 
-def extract_digits(text: str) -> Set[str]:
-    """Extract all standalone or continuous digit strings (PIN codes, house numbers)."""
+def extract_postal_digits(text: str) -> str:
+    """Extract all standalone 3-6 digit sequences as space-separated string."""
     if not text:
-        return set()
-    return set(re.findall(r"\b\d{3,6}\b", text))
+        return ""
+    matches = RE_DIGITS.findall(text)
+    return " ".join(matches) if matches else ""
+
+
+def normalize_record(
+    eid: str, bname: str, baddr: str, country: str
+) -> Tuple[str, str, str, str, str, str, str, str, str, int]:
+    """
+    Normalizes a single record and returns all enriched features as a tuple:
+    (entity_id, country, bname_raw, baddr_raw, name_clean, addr_clean,
+     name_tokens, core_stem, postal_digits, has_address)
+    """
+    bname_str = str(bname) if bname is not None else ""
+    baddr_str = str(baddr) if baddr is not None else ""
+    has_address = 1 if baddr_str.strip() else 0
+
+    name_clean = normalize_business_name(bname_str)
+    addr_clean = normalize_business_address(baddr_str)
+    name_tokens = extract_informative_tokens(name_clean)
+    core_stem = extract_core_name_prefix(name_clean)
+    postal_digits = extract_postal_digits(baddr_str)
+
+    return (
+        eid,
+        country,
+        bname_str,
+        baddr_str,
+        name_clean,
+        addr_clean,
+        name_tokens,
+        core_stem,
+        postal_digits,
+        has_address,
+    )
