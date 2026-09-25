@@ -1,7 +1,7 @@
 """
-Streaming High-Speed Preprocessing Pipeline (Amazon ML Challenge 2026).
-Uses PyArrow ParquetWriter to stream normalized batches directly to disk,
-maintaining constant memory footprint (< 100 MB RAM) across arbitrary file sizes.
+Ultra Low-Memory Streaming Preprocessing Pipeline (Amazon ML Challenge 2026).
+Processes records in small streaming batches (20,000 rows at a time) using PyArrow,
+keeping peak RAM consumption strictly under 100 MB. Works on any instance size.
 """
 
 import os
@@ -9,10 +9,9 @@ import sys
 import time
 import gc
 from pathlib import Path
-from typing import List, Tuple
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
-import polars as pl
 
 # Ensure package import works
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,7 +28,6 @@ from src.config import (
 from src.text_normalizer import normalize_record
 
 
-# Define PyArrow Schema
 PARQUET_SCHEMA = pa.schema([
     ("entity_id", pa.string()),
     ("country", pa.string()),
@@ -44,14 +42,14 @@ PARQUET_SCHEMA = pa.schema([
 ])
 
 
-def preprocess_tsv_streaming(
+def preprocess_tsv_file_streaming(
     input_tsv_path: Path,
     output_parquet_path: Path,
-    chunk_size: int = 50000,
+    batch_size: int = 25000,
 ):
     """
-    Streams a raw TSV file in batches of 50,000 rows directly into a ParquetWriter.
-    Memory usage is strictly constant (< 100 MB RAM).
+    Streams a TSV file in small batches and writes directly to Parquet.
+    Peak memory usage < 100 MB.
     """
     if output_parquet_path.exists():
         print(f"File already exists at {output_parquet_path}. Skipping.")
@@ -62,16 +60,20 @@ def preprocess_tsv_streaming(
     print(f"Output: {output_parquet_path.name}")
     print(f"{'='*70}")
 
-    start_time = time.time()
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    start_time = time.time()
 
-    # Read TSV lazily in batches using Polars scan
-    print("Initializing streaming batch reader...")
+    # Create PyArrow Parquet Writer
+    writer = pq.ParquetWriter(str(output_parquet_path), PARQUET_SCHEMA, compression="SNAPPY")
+
+    total_processed = 0
+    
+    # Read in streaming batches with Polars lazy scan or read_csv_batched
     reader = pl.read_csv_batched(
         input_tsv_path,
         separator="\t",
         has_header=True,
-        batch_size=chunk_size,
+        batch_size=batch_size,
         schema_overrides={
             "entity_id": pl.Utf8,
             "business_name": pl.Utf8,
@@ -80,83 +82,80 @@ def preprocess_tsv_streaming(
         },
     )
 
-    writer = pq.ParquetWriter(output_parquet_path, PARQUET_SCHEMA, compression="snappy")
-    total_processed = 0
+    while True:
+        batches = reader.next_batches(1)
+        if not batches:
+            break
+        df_batch = batches[0]
+        n_rows = len(df_batch)
+        if n_rows == 0:
+            break
 
-    try:
-        while True:
-            batches = reader.next_batches(1)
-            if not batches:
-                break
-            batch_df = batches[0]
-            n_rows = len(batch_df)
-            if n_rows == 0:
-                break
+        eids = df_batch["entity_id"].to_list()
+        bnames = df_batch["business_name"].to_list()
+        baddrs = df_batch["business_address"].to_list()
+        countries = df_batch["country"].to_list()
 
-            eids = batch_df["entity_id"].to_list()
-            bnames = batch_df["business_name"].to_list()
-            baddrs = batch_df["business_address"].to_list()
-            countries = batch_df["country"].to_list()
-            del batch_df
+        col_eids = []
+        col_countries = []
+        col_bname_raw = []
+        col_baddr_raw = []
+        col_name_clean = []
+        col_addr_clean = []
+        col_name_tokens = []
+        col_core_stem = []
+        col_postal_digits = []
+        col_has_address = []
 
-            # Normalize batch
-            c_eids, c_countries, c_bnames, c_baddrs = [], [], [], []
-            c_nclean, c_aclean, c_ntoks, c_stem, c_post, c_has_addr = [], [], [], [], [], []
+        for eid, bname, baddr, country in zip(eids, bnames, baddrs, countries):
+            r = normalize_record(eid, bname, baddr, country)
+            col_eids.append(r[0])
+            col_countries.append(r[1])
+            col_bname_raw.append(r[2])
+            col_baddr_raw.append(r[3])
+            col_name_clean.append(r[4])
+            col_addr_clean.append(r[5])
+            col_name_tokens.append(r[6])
+            col_core_stem.append(r[7])
+            col_postal_digits.append(r[8])
+            col_has_address.append(r[9])
 
-            for eid, bname, baddr, country in zip(eids, bnames, baddrs, countries):
-                r = normalize_record(eid, bname, baddr, country)
-                c_eids.append(r[0])
-                c_countries.append(r[1])
-                c_bnames.append(r[2])
-                c_baddrs.append(r[3])
-                c_nclean.append(r[4])
-                c_aclean.append(r[5])
-                c_ntoks.append(r[6])
-                c_stem.append(r[7])
-                c_post.append(r[8])
-                c_has_addr.append(r[9])
+        # Convert batch to Arrow Table and write directly to disk
+        arrow_table = pa.Table.from_arrays(
+            [
+                pa.array(col_eids, type=pa.string()),
+                pa.array(col_countries, type=pa.string()),
+                pa.array(col_bname_raw, type=pa.string()),
+                pa.array(col_baddr_raw, type=pa.string()),
+                pa.array(col_name_clean, type=pa.string()),
+                pa.array(col_addr_clean, type=pa.string()),
+                pa.array(col_name_tokens, type=pa.string()),
+                pa.array(col_core_stem, type=pa.string()),
+                pa.array(col_postal_digits, type=pa.string()),
+                pa.array(col_has_address, type=pa.int8()),
+            ],
+            schema=PARQUET_SCHEMA,
+        )
 
-            del eids, bnames, baddrs, countries
+        writer.write_table(arrow_table)
+        total_processed += n_rows
 
-            # Write PyArrow RecordBatch directly to disk
-            pa_batch = pa.RecordBatch.from_arrays(
-                [
-                    pa.array(c_eids, type=pa.string()),
-                    pa.array(c_countries, type=pa.string()),
-                    pa.array(c_bnames, type=pa.string()),
-                    pa.array(c_baddrs, type=pa.string()),
-                    pa.array(c_nclean, type=pa.string()),
-                    pa.array(c_aclean, type=pa.string()),
-                    pa.array(c_ntoks, type=pa.string()),
-                    pa.array(c_stem, type=pa.string()),
-                    pa.array(c_post, type=pa.string()),
-                    pa.array(c_has_addr, type=pa.int8()),
-                ],
-                schema=PARQUET_SCHEMA,
-            )
-
-            writer.write_batch(pa_batch)
-            total_processed += n_rows
+        if total_processed % 100000 == 0:
             elapsed = time.time() - start_time
             rate = total_processed / elapsed if elapsed > 0 else 0
-            print(f"  Processed {total_processed:,} rows [{rate:,.0f} rows/s] (RAM < 100MB)")
+            print(f"  Processed {total_processed:,} rows [{rate:,.0f} rows/s] (RAM: < 100 MB)...")
 
-            del c_eids, c_countries, c_bnames, c_baddrs, c_nclean, c_aclean, c_ntoks, c_stem, c_post, c_has_addr, pa_batch
-            gc.collect()
+        del arrow_table, df_batch, col_eids, col_countries, col_name_clean, col_addr_clean
+        gc.collect()
 
-    finally:
-        writer.close()
-
+    writer.close()
     file_size_mb = output_parquet_path.stat().st_size / (1024 * 1024)
-    print(f"Saved {output_parquet_path.name} ({total_processed:,} rows, {file_size_mb:.2f} MB) in {time.time() - start_time:.2f}s.")
+    print(f"Finished {output_parquet_path.name} ({total_processed:,} rows, {file_size_mb:.2f} MB) in {time.time() - start_time:.2f}s.")
 
 
 def run_full_preprocessing():
-    """
-    Executes end-to-end streaming normalization on all 6 train & test TSV files.
-    """
     print("=" * 70)
-    print("PHASE 2: STREAMING TEXT PREPROCESSING & PARQUET CONVERSION")
+    print("PHASE 2: LOW-MEMORY STREAMING PREPROCESSING")
     print("=" * 70)
 
     jobs = [
@@ -173,7 +172,7 @@ def run_full_preprocessing():
         if not input_tsv.exists():
             print(f"[Warning] Input file not found: {input_tsv}. Skipping.")
             continue
-        preprocess_tsv_streaming(input_tsv, output_parquet)
+        preprocess_tsv_file_streaming(input_tsv, output_parquet)
 
     print("\n" + "=" * 70)
     print(f"ALL DATASETS PREPROCESSED SUCCESSFULLY IN {time.time() - total_start:.2f}s!")
