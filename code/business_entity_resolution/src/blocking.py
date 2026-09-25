@@ -53,27 +53,24 @@ class CountryInvertedIndexBlocker:
         postals_col = target_df["postal_digits"].to_list()
 
         self.target_ids = eids
-        self.target_name_clean = names
-        self.target_tokens_set = [set(t.split()) if t else set() for t in tokens_col]
-        self.target_addr_tokens_set = [set(a.split()) if a else set() for a in addrs_col]
-        self.target_postals = [set(p.split()) if p else set() for p in postals_col]
 
         # 1. Exact Name Index & Bigrams
-        for idx, (name, tok_set) in enumerate(zip(names, self.target_tokens_set)):
+        for idx, (name, tok_str) in enumerate(zip(names, tokens_col)):
             if name:
                 self.exact_name_index[name].append(idx)
             
-            # Bigrams
-            tok_list = list(tok_set)
-            for i in range(len(tok_list) - 1):
-                bg = f"{tok_list[i]}_{tok_list[i+1]}"
-                self.bigram_index[bg].append(idx)
+            if tok_str:
+                tok_list = tok_str.split()
+                for i in range(len(tok_list) - 1):
+                    bg = f"{tok_list[i]}_{tok_list[i+1]}"
+                    self.bigram_index[bg].append(idx)
 
         # 2. Token Inverted Index
         raw_token_postings = defaultdict(list)
-        for idx, token_set in enumerate(self.target_tokens_set):
-            for token in token_set:
-                raw_token_postings[token].append(idx)
+        for idx, tok_str in enumerate(tokens_col):
+            if tok_str:
+                for token in set(tok_str.split()):
+                    raw_token_postings[token].append(idx)
 
         for token, postings in raw_token_postings.items():
             p_len = len(postings)
@@ -83,10 +80,11 @@ class CountryInvertedIndexBlocker:
 
         # 3. Address Token Inverted Index (Distinctive words, len >= 3)
         raw_addr_postings = defaultdict(list)
-        for idx, addr_set in enumerate(self.target_addr_tokens_set):
-            for at in addr_set:
-                if len(at) >= 3:
-                    raw_addr_postings[at].append(idx)
+        for idx, addr_str in enumerate(addrs_col):
+            if addr_str:
+                for at in set(addr_str.split()):
+                    if len(at) >= 3:
+                        raw_addr_postings[at].append(idx)
 
         for at, postings in raw_addr_postings.items():
             p_len = len(postings)
@@ -95,14 +93,15 @@ class CountryInvertedIndexBlocker:
                 self.addr_token_weights[at] = 8.0 / (p_len ** 0.35)
 
         # 4. Postal Code Index
-        for idx, postal_set in enumerate(self.target_postals):
-            for p in postal_set:
-                if len(p) >= 4:
-                    self.postal_index[p].append(idx)
+        for idx, post_str in enumerate(postals_col):
+            if post_str:
+                for p in set(post_str.split()):
+                    if len(p) >= 4:
+                        self.postal_index[p].append(idx)
 
-        # Filter bigrams
+        # Filter bigrams and postal postings
         self.bigram_index = {k: v for k, v in self.bigram_index.items() if len(v) <= 10000}
-        self.postal_index = {k: v for k, v in self.postal_index.items() if len(v) <= 1000}
+        self.postal_index = {k: v for k, v in self.postal_index.items() if len(v) <= 500}
 
         elapsed = time.time() - start_time
         print(f"    Indexed {n_rows:,} target records in {elapsed:.2f}s "
@@ -119,9 +118,9 @@ class CountryInvertedIndexBlocker:
         """
         Retrieves top candidate target IDs for a single S1 record.
         """
-        s1_tokens = set(tokens_str.split()) if tokens_str else set()
+        s1_tokens = tokens_str.split() if tokens_str else []
         s1_addr_tokens = [at for at in addr_clean.split() if len(at) >= 3] if addr_clean else []
-        s1_postals = set(postal_str.split()) if postal_str else set()
+        s1_postals = postal_str.split() if postal_str else []
 
         candidate_scores = defaultdict(float)
 
@@ -131,9 +130,8 @@ class CountryInvertedIndexBlocker:
                 candidate_scores[idx] += 100.0
 
         # Signal 2: Name Bigrams (+35.0 priority)
-        tok_list = list(s1_tokens)
-        for i in range(len(tok_list) - 1):
-            bg = f"{tok_list[i]}_{tok_list[i+1]}"
+        for i in range(len(s1_tokens) - 1):
+            bg = f"{s1_tokens[i]}_{s1_tokens[i+1]}"
             if bg in self.bigram_index:
                 for idx in self.bigram_index[bg]:
                     candidate_scores[idx] += 35.0
@@ -160,12 +158,11 @@ class CountryInvertedIndexBlocker:
                 for idx in self.addr_token_index[at]:
                     candidate_scores[idx] += w
 
-        # Signal 5: Postal Code match with at least 1 shared word (+20.0 priority)
+        # Signal 5: Postal Code match
         for postal in s1_postals:
             if postal in self.postal_index:
                 for idx in self.postal_index[postal]:
-                    if s1_tokens & self.target_tokens_set[idx] or (set(s1_addr_tokens) & self.target_addr_tokens_set[idx]):
-                        candidate_scores[idx] += 20.0
+                    candidate_scores[idx] += 2.0
 
         if not candidate_scores:
             return []
