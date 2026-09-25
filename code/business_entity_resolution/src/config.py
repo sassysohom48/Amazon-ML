@@ -14,15 +14,20 @@ TRAIN_DIR = RAW_DIR / "train"
 TEST_DIR = RAW_DIR / "test"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 PROCESSED_DIR = DATASET_DIR / "processed"
+MODELS_DIR = PROJECT_ROOT / "code" / "business_entity_resolution" / "models"
+VALIDATION_SCRIPT = DATASET_DIR / "utils" / "validate_submission.py"
+SUBMISSION_MATCHING_TSV = OUTPUT_DIR / "matching_results.tsv"
+SUBMISSION_CANDIDATE_TSV = OUTPUT_DIR / "candidate_pairs.tsv"
 
 # Fallback check if raw folder exists or direct train folder
 if not TRAIN_DIR.exists() and (DATASET_DIR / "train").exists():
     TRAIN_DIR = DATASET_DIR / "train"
     TEST_DIR = DATASET_DIR / "test"
 
-# Ensure output and processed dirs exist
+# Ensure dirs exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Local TSV Paths
 TRAIN_S1 = TRAIN_DIR / "train_source1.tsv"
