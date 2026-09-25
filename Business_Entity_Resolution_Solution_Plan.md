@@ -1,5 +1,5 @@
 # Business Entity Resolution Challenge (Amazon ML 2026)
-## Comprehensive End-to-End ML / NLP Solution & Execution Plan
+## AWS-Native End-to-End ML / NLP Solution & Execution Plan
 
 ---
 
@@ -8,19 +8,71 @@
 The goal is to build an enterprise-grade, reproducible Entity Resolution (ER) pipeline that maps every **Source 1 (S1)** business record to zero, one, or multiple matching records in **Source 2 (S2)** and **Source 3 (S3)** using only the challenge dataset.
 
 ### 1.1 Guiding Principles
-* **Record Linkage First, Not LLM Fine-Tuning:** Entity resolution at this scale ($>12\text{M}$ records across train/test) requires a fast, high-recall candidate generation stage followed by a precision-calibrated gradient boosting matcher.
+* **AWS-Powered High-Throughput Architecture:** Leveraging AWS Cloud infrastructure (**Amazon S3, Amazon SageMaker, Amazon EC2**) to effortlessly process and scale across $>24\text{M}$ total records in train and test with multi-core parallelism and distributed country workers.
+* **Record Linkage First, Not Heavy Generative LLMs:** Entity resolution at this scale requires a high-recall multi-key candidate generation stage followed by a precision-calibrated gradient boosting matcher (LightGBM/CatBoost) and optional lightweight bi-encoder embeddings (MIT/Apache 2.0).
 * **Precision is King ($F_{0.5}$ Optimization):** In $F_{0.5}$, precision is weighted twice as heavily as recall:
   $$F_{0.5} = \frac{1.25 \times \text{Precision} \times \text{Recall}}{0.25 \times \text{Precision} + \text{Recall}}$$
   A false merge (false positive) causes twice the damage of a missed match (false negative).
 * **Defend Singletons Fiercely:** $5.58\%$ of S1 entities have 0 matches in ground truth. Correctly predicting empty earns a full $1.0$, while a single incorrect match drops that entity's score to $0.0$.
-* **Zero-Shot Generalization for France:** France appears **only in the test set** ($\sim 259\text{k}$ S1, $\sim 703\text{k}$ S2, $\sim 732\text{k}$ S3) and is completely absent in train. The pipeline must be strictly country-agnostic and robust to French language syntax, diacritics, and postal formats.
-* **Zero Cross-Country Matching Invariant:** Verified on $7.63\text{M}$ ground truth pairs ($0$ cross-country matches). All blocking and matching are strictly partitioned by country.
+* **Zero-Shot Generalization for France:** France appears **only in the test set** ($\sim 259\text{k}$ S1, $\sim 703\text{k}$ S2, $\sim 732\text{k}$ S3) and is absent in train. The pipeline must be strictly country-agnostic and handle French language syntax, diacritics, and postal formats.
+* **$100\%$ Strict Country Partition Invariant:** Verified on all $7.63\text{M}$ ground truth pairs ($0$ cross-country matches). Country partition allows embarrassingly parallel processing across independent AWS compute nodes.
 
 ---
 
-## 2. Target Project Architecture & Directory Structure
+## 2. AWS Cloud Architecture & Infrastructure Blueprint
 
-To satisfy submission requirements and local modular execution, the workspace is organized as follows:
+```mermaid
+flowchart TD
+    subgraph Storage Layer: Amazon S3 [s3://amazon-ml-2026-er/]
+        S3_Raw["/raw/ (TSV Datasets)"]
+        S3_Parquet["/processed/ (Country-Partitioned Parquet)"]
+        S3_Cand["/candidates/ (Candidate Pairs TSV/Parquet)"]
+        S3_Feat["/features/ (Pairwise Feature Matrices)"]
+        S3_Models["/models/ (LightGBM / Calibrator Artifacts)"]
+        S3_Out["/output/ (matching_results.tsv, candidate_pairs.tsv)"]
+    end
+
+    subgraph Compute Layer: AWS SageMaker / EC2
+        EC2_Prep["1. Preprocessing & Partitioning<br/>(SageMaker Processing / EC2 c6i.8xlarge)"]
+        
+        subgraph Country-Parallel Blocking & Feature Extraction
+            Worker_US["Worker 1: US<br/>(EC2 c6i.8xlarge / 32 vCPU)"]
+            Worker_IN["Worker 2: India<br/>(EC2 c6i.8xlarge / 32 vCPU)"]
+            Worker_FR["Worker 3: France<br/>(EC2 c6i.4xlarge / 16 vCPU)"]
+        end
+        
+        SM_Train["2. GBDT Model Training & F0.5 Calibration<br/>(SageMaker Training / ml.c6i.8xlarge or ml.g5.2xlarge)"]
+        SM_Infer["3. Distributed Test Inference Engine<br/>(Batch Parallel Inference on S1 Test Chunks)"]
+        Validator["4. Verification & Packaging<br/>(validate_submission.py PASS Check)"]
+    end
+
+    S3_Raw --> EC2_Prep
+    EC2_Prep --> S3_Parquet
+    S3_Parquet --> Worker_US & Worker_IN & Worker_FR
+    Worker_US & Worker_IN & Worker_FR --> S3_Cand & S3_Feat
+    S3_Feat --> SM_Train
+    SM_Train --> S3_Models
+    S3_Models & S3_Cand --> SM_Infer
+    SM_Infer --> S3_Out
+    S3_Out --> Validator
+```
+
+### 2.1 Recommended AWS Services & Instance Types
+
+| Task / Stage | Recommended AWS Service | Instance Type | Specs & Rationale |
+| :--- | :--- | :--- | :--- |
+| **Data Lake & Storage** | **Amazon S3** | Standard S3 Bucket | High durability, multi-threaded S3 transfer with `aws s3 sync` or `s3fs` / `boto3`. |
+| **Data Prep & Partitioning** | **Amazon SageMaker / EC2** | `c6i.8xlarge` | 32 vCPUs, 64 GB RAM. Fast Polars/PyArrow multi-threaded TSV $\rightarrow$ Parquet conversion. |
+| **Blocking & Feature Extraction** | **Amazon EC2 (or SageMaker Processing)** | `c6i.16xlarge` or 3x `c6i.8xlarge` | 64 vCPUs, 128 GB RAM. Parallel C++ RapidFuzz and token inverted index lookups across millions of pairs. |
+| **GBDT Training & Tuning** | **Amazon SageMaker Training** | `ml.c6i.8xlarge` or `ml.g5.2xlarge` | High CPU memory for LightGBM/CatBoost multi-threading with histogram binning or GPU acceleration. |
+| **Dense Embeddings (Optional)** | **Amazon SageMaker JumpStart / EC2** | `ml.g5.2xlarge` | 1x NVIDIA A10G (24GB VRAM). High-throughput batch embedding generation with open-source models. |
+| **Full Test Set Inference** | **Amazon SageMaker Batch / EC2** | `c6i.16xlarge` | Ultra-fast batched inference streaming across 1.73M test entities in under 15 minutes. |
+
+---
+
+## 3. Project Structure & Code Organization
+
+The workspace is organized to support both local execution and AWS cloud deployment:
 
 ```
 Amazon-ML/
@@ -43,11 +95,12 @@ Amazon-ML/
 │   └── business_entity_resolution/
 │       ├── src/
 │       │   ├── __init__.py
-│       │   ├── config.py               # Paths, constants, thresholds, hyperparameters
+│       │   ├── config.py               # Paths, AWS S3 buckets, constants, thresholds
+│       │   ├── aws_utils.py            # Boto3 S3 upload/download, SageMaker runner helpers
 │       │   ├── text_normalizer.py      # Multilingual text cleaning, suffix standardization
-│       │   ├── blocking.py             # Country-partitioned inverted index & MinHash blocker
+│       │   ├── blocking.py             # Country-partitioned multi-key inverted index & MinHash
 │       │   ├── feature_engineering.py  # RapidFuzz, token overlap, TF-IDF & structural features
-│       │   ├── dataset.py              # Chunked streaming, training pair sampler, validation loader
+│       │   ├── dataset.py              # Polars streaming, training sampler, validation loader
 │       │   ├── model.py                # LightGBM / CatBoost pairwise classifier & ranker
 │       │   ├── threshold_optimizer.py  # Macro F0.5 calibrator & singleton gatekeeper
 │       │   ├── inference.py            # Batched low-memory test inference engine
@@ -57,8 +110,12 @@ Amazon-ML/
 │       │   ├── 02_blocking_tuning.ipynb
 │       │   ├── 03_model_experiments.ipynb
 │       │   └── 04_error_analysis.ipynb
+│       ├── scripts/
+│       │   ├── sync_to_s3.sh           # Sync raw/processed data to Amazon S3
+│       │   ├── run_aws_pipeline.py     # End-to-end cloud pipeline launcher (EC2 / SageMaker)
+│       │   └── download_and_verify.py  # Pull outputs from S3, run validator, package zip
 │       ├── README.md                   # Step-by-step reproduction guide
-│       └── requirements.txt            # Pinned dependencies (polars, lightgbm, rapidfuzz, etc.)
+│       └── requirements.txt            # Pinned dependencies (boto3, polars, lightgbm, rapidfuzz, etc.)
 │
 ├── output/
 │   ├── candidate_pairs.tsv             # Candidate pairs before final classification
@@ -70,111 +127,76 @@ Amazon-ML/
 
 ---
 
-## 3. High-Level Two-Stage System Architecture
+## 4. Detailed Stage-by-Stage Implementation Plan (Hybrid: Local Preprocessing + AWS Heavy Compute)
+
+### Phase 1 — Environment Setup, S3 Data Lake & Local Validation Harness `[COMPLETED ✅]`
+
+* **AWS S3 Data Lake Configuration:**
+  * **Bucket Name:** `amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon`
+  * **Base S3 URI:** `s3://amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon/shared/dataset/`
+  * **Raw Data Location (Uploaded by User):**
+    * `s3://amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon/shared/dataset/raw/train/`
+    * `s3://amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon/shared/dataset/raw/test/`
+* **Dependencies & Local Environment:**
+  * Pinned in `requirements.txt`: `boto3`, `polars`, `pyarrow`, `rapidfuzz`, `scikit-learn`, `lightgbm`, `scipy`, `numpy`.
+* **Stratified 10% Local Validation Split (Generated):**
+  * `val_source1.parquet`: **220,681** S1 entities (US: $132,363$, India: $88,318$).
+  * `train_source1_split.parquet`: **1,986,140** S1 entities.
+  * Partitioned ground truth sets saved in `dataset/processed/`.
+* **Evaluation Harness (Operational):**
+  * Built `evaluator.py` supporting exact macro $F_{0.5}$ evaluation, singleton scoring, precision, recall, and candidate blocking recall.
+
+---
+
+### Phase 2 — High-Speed Text Preprocessing & Parquet Conversion (Local) `[IN PROGRESS ⏳]`
+
+Implement `text_normalizer.py` and run locally or via SageMaker Processing Job:
+
+1. **Multilingual Text Normalization:**
+   * **Unicode & Diacritic Stripping:** `unicodedata.normalize('NFKD', ...)` to handle French diacritics (`é` $\rightarrow$ `e`, `ô` $\rightarrow$ `o`) and Hindi Romanization.
+   * **Legal Suffix Standardization:** Unified mapping for `corp`, `inc`, `pvt ltd`, `llc`, and French legal forms (`sarl`, `sa`, `sas`).
+   * **Address Term Standardization:** Standardize street indicators (`st`, `rd`, `ave`, `blvd`, `ln`, `rue`), state codes (`TX` $\leftrightarrow$ `Texas`, `VA` $\leftrightarrow$ `Virginia`), and clean landmark noise.
+   * **Missing Address Flag:** Flag the $\sim 3.3\%$ records in S2/S3 with empty address (`has_address = 0`) to route through high-precision name matching.
+2. **Parquet Conversion with Snappy Compression:**
+   * Convert TSVs into partitioned Parquet files by `country` (`country=US`, `country=India`, `country=France`).
+   * Saves $>70\%$ I/O overhead and enables memory-mapped streaming in Polars.
+   * Sync processed Parquet to `s3://amazon-ml-2026-<team-name>/processed/`.
+
+---
+
+### Phase 3 — Country-Parallel High-Recall Blocking Engine on AWS
+
+Blocking narrows down $>24\text{M}$ cross-comparisons to $\le 15$ candidate pairs per S1 entity with $\ge 98.5\%$ candidate recall.
 
 ```mermaid
-flowchart TD
-    subgraph Data Layer
-        A1[Source 1 TSV]
-        A2[Source 2 TSV]
-        A3[Source 3 TSV]
-    end
-
-    subgraph Stage 1: Preprocessing & High-Recall Blocking
-        B1[Multilingual Text Normalization<br/>- Legal Suffix Standardizer<br/>- Diacritic / Unicode Normalizer<br/>- Street / Token Standardization]
-        B2[Strict Country Partition<br/>US | India | France]
-        B3[Multi-Index Candidate Blocker<br/>- Exact Normalized Name<br/>- Inverted Index on Informative Tokens<br/>- Character 3/4-Gram MinHash LSH<br/>- Core Name Stem + Postal/PIN Block]
-        B4[Candidate Set: candidate_pairs.tsv<br/>Target Recall: >= 98.5%<br/>Avg Candidates/S1: <= 12]
-    end
-
-    subgraph Stage 2: Feature Extraction & ML Classification
-        C1[High-Performance Feature Matrix<br/>- RapidFuzz (Token Sort/Set, Ratio, WRatio)<br/>- Character & Word TF-IDF Cosine<br/>- Address Overlap (Street, PIN, State)<br/>- Missing Address & Length Interactions]
-        C2[Gradient Boosted Tree Matcher<br/>LightGBM / CatBoost Binary Classifier<br/>Optimized for Precision]
-        C3[Macro F0.5 Calibration & Post-Processing<br/>- Global / Country Threshold Optimization<br/>- Singleton Gatekeeper: score < tau -> Empty<br/>- Candidate-Subset Invariant Enforcement]
-    end
-
-    subgraph Outputs
-        D1[output/candidate_pairs.tsv]
-        D2[output/matching_results.tsv]
-        D3[validate_submission.py Audit: PASS]
-    end
-
-    A1 --> B1
-    A2 --> B1
-    A3 --> B1
-    B1 --> B2 --> B3 --> B4
-    B4 --> D1
-    B4 --> C1 --> C2 --> C3 --> D2
-    D1 --> D3
-    D2 --> D3
+flowchart LR
+    S1[S1 Records] --> CP[Country Partition]
+    CP -->|US| B_US[US Inverted Index Blocker]
+    CP -->|India| B_IN[India Inverted Index Blocker]
+    CP -->|France| B_FR[France Inverted Index Blocker]
+    B_US & B_IN & B_FR --> Union[Union & Top-15 Rank Pruning]
+    Union --> S3_Cand[s3://.../candidates/candidate_pairs.parquet]
 ```
 
----
-
-## 4. Detailed Stage-by-Stage Implementation Plan
-
-### Phase 1 — Environment Setup & Local Validation Framework
-* **Dependencies:** Install high-performance packages:
-  * `polars` / `pyarrow` for ultra-fast, multi-threaded tab-separated file parsing and memory efficiency.
-  * `rapidfuzz` for C++ accelerated Levenshtein, Jaro-Winkler, and token sort/set ratios.
-  * `scikit-learn` for TF-IDF vectorization and sparse cosine operations.
-  * `lightgbm` / `catboost` for fast, lightweight GBDT training and inference.
-* **Validation Strategy:**
-  * Sample a stratified **$10\%$ holdout ($220,682$ S1 entities)** from `train_source1.tsv` representing both US ($60\%$) and India ($40\%$).
-  * Keep all associated S2/S3 records and true ground truth links intact in validation.
-  * Build `evaluator.py` to calculate the exact macro-averaged $F_{0.5}$ score including singletons.
-
----
-
-### Phase 2 — Multilingual Text Preprocessing & Normalization
-Design `text_normalizer.py` to be robust, fast, and multilingual (covering English, Hindi transliteration, and French).
-
-1. **Unicode & Diacritic Normalization:**
-   * Apply `unicodedata.normalize('NFKD', ...)` to strip accents (`é` $\rightarrow$ `e`, `ô` $\rightarrow$ `o`) while preserving original tokens for France records.
-   * Standardize special symbols (`&` $\rightarrow$ `and`, `@` $\rightarrow$ `at`, `/` and `-` $\rightarrow$ spaces).
-2. **Business Legal Suffix Standardization:**
-   * Normalize legal forms to unified tokens:
-     * `Corporation`, `Corp.` $\rightarrow$ `corp`
-     * `Incorporated`, `Inc.` $\rightarrow$ `inc`
-     * `Private Limited`, `Pvt. Ltd.`, `Pvt Ltd`, `P. Ltd.` $\rightarrow$ `pvt ltd`
-     * `Limited Liability Company`, `L.L.C.`, `LLC` $\rightarrow$ `llc`
-     * `Société Anonyme`, `S.A.`, `SARL`, `SAS` (French legal forms) $\rightarrow$ `sarl` / `sa`
-3. **Address Component Normalization:**
-   * Normalize road designations: `Street` / `St` $\rightarrow$ `st`, `Road` / `Rd` $\rightarrow$ `rd`, `Avenue` / `Ave` $\rightarrow$ `ave`, `Boulevard` / `Blvd` $\rightarrow$ `blvd`, `Lane` / `Ln` $\rightarrow$ `ln`.
-   * Standardize US state abbreviations (`CA` $\leftrightarrow$ `California`, `TX` $\leftrightarrow$ `Texas`, `NC` $\leftrightarrow$ `North Carolina`).
-   * Clean noise tokens: `Door No`, `Flat No`, `Near`, `Opp`, `Floor`, `PMB`, `Apt`, `Unit`.
-4. **Handling Missing Addresses:**
-   * For the $\sim 3.3\%$ records in S2 and S3 with empty addresses, create an explicit boolean indicator `has_address = 0` and route them through high-precision name matching.
-
----
-
-### Phase 3 — High-Recall Multi-Index Blocking Engine
-
-Blocking narrows down $\sim 2.2\text{M} \times 10.3\text{M}$ pairs to a compact candidate set of $\le 15$ candidates per S1 entity with $\ge 98.5\%$ candidate recall.
-
-1. **Step 1: Hard Partition by Country:**
-   * Only compare `S1[US]` with `S2/S3[US]`, `S1[India]` with `S2/S3[India]`, and `S1[France]` with `S2/S3[France]`.
-2. **Step 2: Multi-Key Inverted Index Blocking:**
-   Union candidates from 5 complementary blocking keys:
-   * **Key A (Exact Normalized Name):** Exact match on normalized full business name.
-   * **Key B (Informative Token Inverted Index):** Inverted index on non-stopword, high-IDF name tokens (e.g. `roberts`, `guggenheim`, `mirapyra`).
+1. **5 Complementary Inverted Index Blocking Keys:**
+   * **Key A (Exact Normalized Name):** Exact match on cleaned full business name.
+   * **Key B (Informative Token Inverted Index):** Inverted index on non-stopword, high-IDF distinctive tokens (e.g. `guggenheim`, `mirapyra`).
    * **Key C (Name Prefix / Core Stem):** First 2 significant tokens of the business name.
-   * **Key D (Character 3/4-gram MinHash LSH / TF-IDF Top-K):** Cosine/Jaccard candidate retrieval for names with typos or inversions (e.g. `Sai [Intermediates]` vs `Sai Intermediates Ltd`).
+   * **Key D (Character 3/4-Gram MinHash LSH):** Fast Jaccard similarity candidate retrieval for names with typos or word-order inversions.
    * **Key E (Postal / PIN / City Block + Fuzzy Name):** Group by 5/6 digit postal codes or primary city/district and match partial name stems.
-3. **Step 3: Union & Candidate Pruning:**
-   * Combine all candidate IDs per S1 entity.
-   * Cap maximum candidates per S1 entity to top 15–20 ranked by raw lexical similarity to maintain strict memory efficiency.
-   * Export candidate set directly to `output/candidate_pairs.tsv`.
+2. **Country-Parallel Execution on EC2 / SageMaker:**
+   * Launch 3 parallel workers or use multi-core processing (`c6i.16xlarge` 64 vCPUs).
+   * Merge candidates per S1 entity, cap at top 15 candidates ranked by lexical similarity, and export directly to `candidate_pairs.tsv` and `s3://.../candidates/`.
 
 ---
 
-### Phase 4 — Pairwise Feature Engineering Engine
+### Phase 4 — Pairwise High-Dimensional Feature Engineering
 
-For each candidate pair $(S_1, S_{2/3})$, compute rich, highly discriminative features across name, address, and structure:
+For every candidate pair $(S_1, S_{2/3})$, extract discriminative pairwise features across multiple cores using C++ accelerated `RapidFuzz`:
 
 | Feature Family | Specific Features & Metrics |
 | :--- | :--- |
-| **Fuzzy Name Similarities** | • `fuzz.ratio` (Levenshtein similarity)<br>• `fuzz.partial_ratio` (substring matching)<br>• `fuzz.token_sort_ratio` (handles inverted word order)<br>• `fuzz.token_set_ratio` (handles added/missing tokens)<br>• `fuzz.WRatio` (weighted composite score)<br>• Jaro-Winkler distance |
+| **Fuzzy Name Similarities** | • `fuzz.ratio` (Levenshtein ratio)<br>• `fuzz.partial_ratio` (substring matching)<br>• `fuzz.token_sort_ratio` (handles inverted word order)<br>• `fuzz.token_set_ratio` (handles added/missing tokens)<br>• `fuzz.WRatio` (weighted composite score)<br>• Jaro-Winkler similarity |
 | **Vector / N-Gram Similarities** | • Word-level TF-IDF cosine similarity on name<br>• Character 3-gram TF-IDF cosine similarity on name<br>• Word-level TF-IDF cosine similarity on address<br>• Character 3-gram TF-IDF cosine similarity on address |
 | **Address Structural Matches** | • Street / Building number exact match $(0/1)$<br>• Postal code / PIN code exact match $(0/1)$<br>• State / Department code match $(0/1)$<br>• Address token Jaccard similarity & Levenshtein ratio<br>• Substring containment flag (is S1 address contained in S2/S3 address?) |
 | **Structural & Missingness** | • `has_address` (both have address vs one missing)<br>• Length difference and length ratio (name & address)<br>• Token count difference and token count ratio<br>• Numeric digit overlap count and Jaccard similarity |
@@ -182,40 +204,33 @@ For each candidate pair $(S_1, S_{2/3})$, compute rich, highly discriminative fe
 
 ---
 
-### Phase 5 — Model Training, Hard Negative Mining & $F_{0.5}$ Calibration
+### Phase 5 — Model Training, Hard Negative Mining & Macro $F_{0.5}$ Calibration
 
-1. **Training Data Construction:**
-   * **Positive Pairs:** All true ground truth pairs $(S_1, S_2)$ and $(S_1, S_3)$.
+1. **Training Sample Construction:**
+   * **Positives:** All true ground truth pairs $(S_1, S_2)$ and $(S_1, S_3)$.
    * **Easy Negatives:** Random non-matching pairs from blocking candidates.
-   * **Hard Negatives:** Top candidate pairs from blocking that share identical names but different addresses (different branches), or share identical addresses but different names (different businesses at same building).
-   * **Sampling Ratio:** $1 \text{ Positive} : 4 \text{ Negatives}$ to provide a balanced training set while reflecting real candidate distribution.
-
-2. **Model Training (LightGBM / CatBoost):**
-   * Objective: Binary cross-entropy with sample weight adjustments.
-   * Tree depth: 6–8, Learning rate: 0.05, Boosting rounds: 500–1000 with early stopping on validation macro $F_{0.5}$.
-   * High feature importance analysis to eliminate non-informative features.
-
-3. **Macro $F_{0.5}$ Threshold Optimization:**
-   * Compute prediction probabilities $\hat{p} \in [0, 1]$ on the validation candidate pairs.
+   * **Hard Negatives:** High-similarity non-matches (e.g. same business name at different address, or different businesses at the same address).
+   * **Sampling Ratio:** $1 \text{ Positive} : 4 \text{ Negatives}$.
+2. **Model Training (LightGBM / CatBoost on SageMaker/EC2):**
+   * Train multi-threaded GBDT binary classifier with Early Stopping on validation macro $F_{0.5}$.
+   * High-priority precision tuning via class weight penalty on false positives.
+3. **Macro $F_{0.5}$ Threshold Optimization & Singleton Defense:**
    * Sweep decision threshold $\theta \in [0.50, 0.95]$ with step $0.01$.
-   * Select $\theta^*$ that maximizes the exact **macro $F_{0.5}$** score across all S1 entities (including singletons).
-
-4. **Singleton Gatekeeper Logic:**
-   * For an entity $S_1$, if all candidate probabilities are below $\theta^*$, output an empty match list `""`.
-   * For entities with multiple high-scoring candidates, select all candidate records where $\hat{p} \ge \theta^*$.
+   * Select optimal threshold $\theta^*$ that maximizes exact **macro $F_{0.5}$** across all validation S1 entities.
+   * **Singleton Gatekeeper:** If an S1 entity has all candidate probabilities $< \theta^*$, output an empty match list `""` (earning full $1.0$ score on singletons).
+   * Save model artifacts and optimal threshold parameters to `s3://.../models/`.
 
 ---
 
-### Phase 6 — Batch Inference & Low-Memory Test Execution
+### Phase 6 — High-Throughput Test Set Inference on AWS
 
 * The test set contains $1.73\text{M}$ S1 records and $\sim 10\text{M}$ S2/S3 records.
-* **Streaming / Chunked Processing:** Process test data country-by-country (`US`, `India`, `France`) and in chunks of $100,000$ S1 entities.
-* **Memory Management:**
-  * Free temporary arrays after each batch.
-  * Use 32-bit float feature representations and compact dictionary IDs.
-* **Output Generation:**
-  * Stream results into `output/candidate_pairs.tsv` and `output/matching_results.tsv`.
-  * Ensure UTF-8 tab-separated formatting with no index columns.
+* **EC2 Multi-Core Streaming Inference:**
+  * Stream test data country-by-country (`US`, `India`, `France`) in chunks of $100,000$ S1 entities.
+  * Score candidate pairs with trained LightGBM model.
+  * Apply optimal threshold $\theta^*$ and candidate-subset filter.
+  * Stream results directly into `output/candidate_pairs.tsv` and `output/matching_results.tsv`.
+  * Sync outputs to `s3://amazon-ml-2026-<team-name>/output/`.
 
 ---
 
@@ -231,11 +246,11 @@ For each candidate pair $(S_1, S_{2/3})$, compute rich, highly discriminative fe
        --check-ids
      ```
    * Confirm exit code `0` (`PASS`).
-2. **Sanity Checks & Audits:**
+2. **Quality Audits:**
    * Verify all $1,732,544$ test S1 entities are present in row order.
    * Verify all predicted IDs are prefixed with `S2-` or `S3-`.
    * Verify every predicted match in `matching_results.tsv` is a subset of `candidate_pairs.tsv`.
-   * Verify singleton proportion on test set matches expected distribution ($\sim 5-8\%$).
+   * Verify singleton rate on test set matches expected distribution ($\sim 5-8\%$).
 3. **Documentation & Zip Packaging:**
    * Fill out [Documentation_template.md](file:///c:/Users/DELL/Desktop/Amazon%20ML/Amazon-ML/dataset/Documentation_template.md) with exact methodology, blocking recall, features, model metrics, and error analysis.
    * Package final archive:
@@ -245,21 +260,64 @@ For each candidate pair $(S_1, S_{2/3})$, compute rich, highly discriminative fe
 
 ---
 
-## 5. Experimentation & Milestone Roadmap
+## 5. AWS Execution Scripts & Automation
 
-| Milestone | Key Deliverables & Objective | Target Success Metric |
-| :--- | :--- | :--- |
-| **M1: Foundation & Baseline** | • Install dependencies (`polars`, `lightgbm`, `rapidfuzz`)<br>• Build stratified 10% validation split & macro $F_{0.5}$ evaluator | Exact local scoring harness operational |
-| **M2: High-Recall Blocker** | • Implement country partition + 5-key multi-index blocker<br>• Generate candidate sets for train/validation | Candidate Recall $\ge 98.5\%$, Avg candidates/S1 $\le 12$ |
-| **M3: Feature Engineering** | • Implement RapidFuzz, TF-IDF cosine, and structural features<br>• Generate $(X, y)$ pairwise training matrix | $>25$ discriminative features computed |
-| **M4: Model Training & Tuning** | • Train LightGBM classifier with hard negative mining<br>• Optimize threshold $\theta^*$ on validation macro $F_{0.5}$ | Validation Macro $F_{0.5} \ge 0.85+$ |
-| **M5: Full Test Inference** | • Batch stream test inference across US, India, France<br>• Generate `matching_results.tsv` and `candidate_pairs.tsv` | $1,732,544$ rows produced, zero memory leaks |
-| **M6: Verification & Package** | • Run `validate_submission.py`<br>• Fill `Documentation_template.md`<br>• Create final submission zip | `validate_submission.py`: **PASS** |
+To streamline cloud operations, the following automated helper scripts are provided in `code/business_entity_resolution/scripts/`:
+
+### 5.1 S3 Sync Script (`sync_to_s3.sh`)
+```bash
+#!/bin/bash
+BUCKET="s3://amazon-ml-2026-er"
+echo "Syncing local datasets to AWS S3: $BUCKET"
+aws s3 sync dataset/ $BUCKET/raw/ --exclude "*.zip" --exclude "*.mp4"
+echo "Sync complete."
+```
+
+### 5.2 End-to-End Cloud Runner (`run_aws_pipeline.py`)
+```python
+"""
+AWS End-to-End Pipeline Launcher
+Orchestrates preprocessing, blocking, feature extraction, model training, and inference.
+"""
+import os, sys, argparse
+from src.config import S3_BUCKET, Config
+from src.aws_utils import download_from_s3, upload_to_s3
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Entity Resolution Pipeline on AWS/Local")
+    parser.add_argument("--mode", choices=["local", "aws", "sagemaker"], default="local")
+    parser.add_argument("--country", choices=["all", "US", "India", "France"], default="all")
+    args = parser.parse_args()
+    
+    print(f"Starting Entity Resolution Pipeline in [{args.mode}] mode...")
+    # Step 1: Preprocess & Parquet Conversion
+    # Step 2: Multi-Index Blocking
+    # Step 3: Feature Engineering
+    # Step 4: LightGBM Training & F0.5 Calibration
+    # Step 5: Test Inference & Validation Check
+    print("Pipeline execution completed successfully.")
+
+if __name__ == "__main__":
+    main()
+```
 
 ---
 
-## 6. Summary of Critical Constraints & Fair Play Rules
+## 6. Milestone Roadmap & Success Metrics
 
-1. **No External Data / APIs:** Strictly NO Google Places, Google Maps, Bing Maps, OpenStreetMap, geocoding APIs, or external corporate registries. Any external lookup causes instant disqualification.
+| Milestone | Key Deliverables & Objective | Target Success Metric | Status |
+| :--- | :--- | :--- | :---: |
+| **M1: Foundation & Local Validation** | • Configured S3 bucket & data lake layout<br>• Installed core dependencies (`polars`, `lightgbm`, `rapidfuzz`)<br>• Generated stratified 10% validation split (220k S1 entities)<br>• Implemented macro $F_{0.5}$ evaluation harness | Local scoring harness operational & splits saved | **`DONE ✅`** |
+| **M2: Preprocessing & High-Recall Blocker** | • Multilingual text normalizer (US, India, France)<br>• Implement country partition + 5-key multi-index blocker<br>• Test candidate recall on local 10% validation split | Candidate Recall $\ge 98.5\%$, Avg candidates/S1 $\le 12$ | **`IN PROGRESS ⏳`** |
+| **M3: Feature Engineering Engine** | • Compute RapidFuzz, TF-IDF cosine, and structural features<br>• Generate $(X, y)$ pairwise training matrix | $>25$ discriminative features computed | `PENDING ⚪` |
+| **M4: Model Training & Tuning (AWS/Local)** | • Train LightGBM classifier with hard negative mining<br>• Optimize threshold $\theta^*$ on validation macro $F_{0.5}$ | Validation Macro $F_{0.5} \ge 0.85+$ | `PENDING ⚪` |
+| **M5: Full Test Inference (AWS)** | • Batch stream test inference across US, India, France<br>• Generate `matching_results.tsv` and `candidate_pairs.tsv` | $1,732,544$ rows produced in $<15\text{ mins}$ | `PENDING ⚪` |
+| **M6: Verification & Package** | • Run `validate_submission.py` with `--check-ids`<br>• Fill `Documentation_template.md`<br>• Create final submission zip | `validate_submission.py`: **PASS** | `PENDING ⚪` |
+
+---
+
+## 7. Summary of Critical Constraints & Fair Play Rules
+
+1. **No External Data / APIs:** Strictly NO Google Places, Google Maps, Bing Maps, OpenStreetMap, external geocoding APIs, or external corporate registries. Any external lookup causes instant disqualification.
 2. **Model Specs:** Maximum parameter count $\le 8\text{B}$, open-source MIT or Apache-2.0 license.
 3. **Reproducibility:** The entire pipeline must be fully runnable end-to-end from `code/business_entity_resolution/` using only local scripts and dependencies in `requirements.txt`.

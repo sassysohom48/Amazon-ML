@@ -1,0 +1,13 @@
+# Core Data & Cloud
+boto3>=1.34.0
+polars>=0.20.0
+pyarrow>=15.0.0
+
+# String Similarity & NLP
+rapidfuzz>=3.8.0
+scikit-learn>=1.4.0
+scipy>=1.12.0
+
+# Machine Learning & Modeling
+lightgbm>=4.3.0
+pypdf>=4.0.0

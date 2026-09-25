@@ -1,2 +1,51 @@
+# Datasets & Large Archives
 dataset/
 dataset.zip
+*.zip
+*.tar.gz
+*.parquet
+*.mp4
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDEs & System Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Large Temporary & Model Outputs
+output/
+*.log
+*.tmp
