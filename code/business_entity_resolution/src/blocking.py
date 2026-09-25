@@ -248,8 +248,17 @@ def run_blocking_pipeline(evaluate_on_val: bool = True) -> None:
             print(f"  • Avg Candidates per S1:   {metrics['avg_candidates_per_s1']} (Max Cap: {MAX_CANDIDATES_PER_S1})")
             print("=" * 50)
 
+            # Persist validation candidates to disk for fast resumption
+            val_cand_df = candidates_dict_to_dataframe(
+                {s1_id: list(cands) for s1_id, cands in val_candidates.items()}
+            )
+            val_cand_out = CANDIDATES_DIR / "val_candidates.parquet"
+            val_cand_df.write_parquet(val_cand_out, compression="snappy")
+            print(f"✅ Saved validation candidate pairs to {val_cand_out.name}")
+
     total_time = time.time() - start_total
     print(f"\n✅ Step 2 Candidate Blocking finished in {total_time:.2f} seconds.")
+
 
 
 if __name__ == "__main__":
