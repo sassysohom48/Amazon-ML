@@ -78,128 +78,134 @@ class CountryMultiChannelIndex:
         self.idx_postal_exact: Dict[str, array.array] = defaultdict(lambda: array.array('I'))
         self.idx_phonetic_postal: Dict[Tuple[str, str], array.array] = defaultdict(lambda: array.array('I'))
 
-    def fit(self, target_df: pl.DataFrame):
+    def fit(self, target_df: pl.DataFrame, batch_size: int = 250000):
         """
-        Builds high-recall inverted indexes using raw C-level uint32 arrays.
+        Builds high-recall inverted indexes using raw C-level uint32 arrays with streaming batch slicing.
         """
         start_time = time.time()
         n_rows = len(target_df)
 
-        eids = target_df["entity_id"].to_list()
-        name_cores = target_df["name_core"].to_list()
-        name_tokens_col = target_df["name_tokens"].to_list()
-        name_cleans_col = target_df["name_clean"].to_list() if "name_clean" in target_df.columns else name_cores
-        acronyms = target_df["name_acronym"].to_list()
-        phonetics = target_df["name_phonetic"].to_list()
-        
-        addr_tokens_col = target_df["addr_tokens"].to_list()
-        addr_digits_col = target_df["addr_digits"].to_list()
-        addr_units_col = target_df["addr_unit_num"].to_list()
-        postals_col = target_df["postal_clean"].to_list()
-
-        self.target_ids = eids
-        self.target_postals = [str(p) if p else "" for p in postals_col]
+        self.target_ids = target_df["entity_id"].to_list()
+        postals_raw = target_df["postal_clean"].to_list() if "postal_clean" in target_df.columns else []
+        self.target_postals = [str(p) if p else "" for p in postals_raw]
+        del postals_raw
         max_p = self.max_posting_len
 
-        for idx in range(n_rows):
-            n_core = str(name_cores[idx]) if name_cores[idx] else ""
-            n_clean = str(name_cleans_col[idx]) if name_cleans_col[idx] else ""
-            n_tok_str = str(name_tokens_col[idx]) if name_tokens_col[idx] else ""
-            a_tok_str = str(addr_tokens_col[idx]) if addr_tokens_col[idx] else ""
-            postal = self.target_postals[idx]
-            postal_pfx = postal[:4] if len(postal) >= 4 else postal
+        for chunk_start in range(0, n_rows, batch_size):
+            chunk = target_df.slice(chunk_start, batch_size)
+            chunk_len = len(chunk)
 
-            acro = str(acronyms[idx]) if acronyms[idx] else ""
-            phone = str(phonetics[idx]) if phonetics[idx] else ""
-            digits_str = str(addr_digits_col[idx]) if addr_digits_col[idx] else ""
-            primary_digit = digits_str.split()[0] if digits_str else ""
-            unit_num = str(addr_units_col[idx]) if addr_units_col[idx] else ""
+            name_cores = chunk["name_core"].to_list() if "name_core" in chunk.columns else [""] * chunk_len
+            name_cleans_col = chunk["name_clean"].to_list() if "name_clean" in chunk.columns else name_cores
+            name_tokens_col = chunk["name_tokens"].to_list() if "name_tokens" in chunk.columns else [""] * chunk_len
+            acronyms = chunk["name_acronym"].to_list() if "name_acronym" in chunk.columns else [""] * chunk_len
+            phonetics = chunk["name_phonetic"].to_list() if "name_phonetic" in chunk.columns else [""] * chunk_len
+            addr_tokens_col = chunk["addr_tokens"].to_list() if "addr_tokens" in chunk.columns else [""] * chunk_len
+            addr_digits_col = chunk["addr_digits"].to_list() if "addr_digits" in chunk.columns else [""] * chunk_len
+            addr_units_col = chunk["addr_unit_num"].to_list() if "addr_unit_num" in chunk.columns else [""] * chunk_len
 
-            # Domain-stripped forms
-            n_core_no_dom = strip_domain_suffix(n_core)
-            n_clean_no_dom = strip_domain_suffix(n_clean)
-            n_concat = n_clean_no_dom.replace(" ", "")
+            for i in range(chunk_len):
+                idx = chunk_start + i
+                n_core = str(name_cores[i]) if name_cores[i] else ""
+                n_clean = str(name_cleans_col[i]) if name_cleans_col[i] else ""
+                n_tok_str = str(name_tokens_col[i]) if name_tokens_col[i] else ""
+                a_tok_str = str(addr_tokens_col[i]) if addr_tokens_col[i] else ""
+                postal = self.target_postals[idx]
+                postal_pfx = postal[:4] if len(postal) >= 4 else postal
 
-            # 1. Exact Core Name & Concatenated Name Forms
-            if n_core and len(n_core) >= 3:
-                p = self.idx_name_core[n_core]
-                if len(p) < max_p:
-                    p.append(idx)
+                acro = str(acronyms[i]) if acronyms[i] else ""
+                phone = str(phonetics[i]) if phonetics[i] else ""
+                digits_str = str(addr_digits_col[i]) if addr_digits_col[i] else ""
+                primary_digit = digits_str.split()[0] if digits_str else ""
+                unit_num = str(addr_units_col[i]) if addr_units_col[i] else ""
 
-            if n_core_no_dom and n_core_no_dom != n_core and len(n_core_no_dom) >= 3:
-                p = self.idx_name_core[n_core_no_dom]
-                if len(p) < max_p:
-                    p.append(idx)
+                # Domain-stripped forms
+                n_core_no_dom = strip_domain_suffix(n_core)
+                n_clean_no_dom = strip_domain_suffix(n_clean)
+                n_concat = n_clean_no_dom.replace(" ", "")
 
-            if n_concat and len(n_concat) >= 4 and n_concat != n_core and n_concat != n_core_no_dom:
-                p = self.idx_name_core[n_concat]
-                if len(p) < max_p:
-                    p.append(idx)
-
-            # 2. Name Tokens (Deep Postings)
-            all_name_toks = set()
-            if n_tok_str:
-                all_name_toks.update(n_tok_str.split())
-            if n_clean_no_dom:
-                all_name_toks.update([t for t in n_clean_no_dom.split() if len(t) >= 3])
-
-            for t in all_name_toks:
-                if len(t) >= 3:
-                    p = self.idx_name_tokens[t]
+                # 1. Exact Core Name & Concatenated Name Forms
+                if n_core and len(n_core) >= 3:
+                    p = self.idx_name_core[n_core]
                     if len(p) < max_p:
                         p.append(idx)
 
-            # 3. First 2 tokens stem
-            n_tok_list = n_tok_str.split() if n_tok_str else []
-            if len(n_tok_list) >= 2:
-                stem = f"{n_tok_list[0]}_{n_tok_list[1]}"
-                p = self.idx_name_stem[stem]
-                if len(p) < max_p:
-                    p.append(idx)
-
-            # 4. Character 3-grams for Brand Names
-            if n_clean_no_dom and len(n_clean_no_dom) >= 4:
-                char3_list = extract_char_3grams(n_clean_no_dom)
-                for c3 in set(char3_list):
-                    p = self.idx_name_char3[c3]
-                    if len(p) < 600:
+                if n_core_no_dom and n_core_no_dom != n_core and len(n_core_no_dom) >= 3:
+                    p = self.idx_name_core[n_core_no_dom]
+                    if len(p) < max_p:
                         p.append(idx)
 
-            # 5. Acronym
-            if acro and len(acro) >= 2:
-                p = self.idx_acronym[acro]
-                if len(p) < 600:
-                    p.append(idx)
+                if n_concat and len(n_concat) >= 4 and n_concat != n_core and n_concat != n_core_no_dom:
+                    p = self.idx_name_core[n_concat]
+                    if len(p) < max_p:
+                        p.append(idx)
 
-            # 6. Address Token Postings (Deep Postings)
-            if a_tok_str:
-                for at in set(a_tok_str.split()):
-                    if len(at) >= 3:
-                        p = self.idx_addr_tokens[at]
+                # 2. Name Tokens (Deep Postings)
+                all_name_toks = set()
+                if n_tok_str:
+                    all_name_toks.update(n_tok_str.split())
+                if n_clean_no_dom:
+                    all_name_toks.update([t for t in n_clean_no_dom.split() if len(t) >= 3])
+
+                for t in all_name_toks:
+                    if len(t) >= 3:
+                        p = self.idx_name_tokens[t]
                         if len(p) < max_p:
                             p.append(idx)
 
-            # 7. Numeric Identity (Postal + Building/Shop Digit or Unit)
-            if postal:
-                if primary_digit:
-                    p = self.idx_numeric_postal[(postal, primary_digit)]
-                    if len(p) < 500:
+                # 3. First 2 tokens stem
+                n_tok_list = n_tok_str.split() if n_tok_str else []
+                if len(n_tok_list) >= 2:
+                    stem = f"{n_tok_list[0]}_{n_tok_list[1]}"
+                    p = self.idx_name_stem[stem]
+                    if len(p) < max_p:
                         p.append(idx)
-                if unit_num:
-                    p = self.idx_numeric_postal[(postal, unit_num)]
+
+                # 4. Character 3-grams for Brand Names
+                if n_clean_no_dom and len(n_clean_no_dom) >= 4:
+                    char3_list = extract_char_3grams(n_clean_no_dom)
+                    for c3 in set(char3_list):
+                        p = self.idx_name_char3[c3]
+                        if len(p) < 600:
+                            p.append(idx)
+
+                # 5. Acronym
+                if acro and len(acro) >= 2:
+                    p = self.idx_acronym[acro]
+                    if len(p) < 600:
+                        p.append(idx)
+
+                # 6. Address Token Postings (Deep Postings)
+                if a_tok_str:
+                    for at in set(a_tok_str.split()):
+                        if len(at) >= 3:
+                            p = self.idx_addr_tokens[at]
+                            if len(p) < max_p:
+                                p.append(idx)
+
+                # 7. Numeric Identity (Postal + Building/Shop Digit or Unit)
+                if postal:
+                    if primary_digit:
+                        p = self.idx_numeric_postal[(postal, primary_digit)]
+                        if len(p) < 500:
+                            p.append(idx)
+                    if unit_num:
+                        p = self.idx_numeric_postal[(postal, unit_num)]
+                        if len(p) < 500:
+                            p.append(idx)
+
+                    # Postal Exact
+                    p_post = self.idx_postal_exact[postal]
+                    if len(p_post) < 600:
+                        p_post.append(idx)
+
+                # 8. Phonetic + Postal Prefix
+                if phone and postal_pfx:
+                    p = self.idx_phonetic_postal[(phone, postal_pfx)]
                     if len(p) < 500:
                         p.append(idx)
 
-                # Postal Exact
-                p_post = self.idx_postal_exact[postal]
-                if len(p_post) < 600:
-                    p_post.append(idx)
-
-            # 8. Phonetic + Postal Prefix
-            if phone and postal_pfx:
-                p = self.idx_phonetic_postal[(phone, postal_pfx)]
-                if len(p) < 500:
-                    p.append(idx)
+            del chunk, name_cores, name_cleans_col, name_tokens_col, acronyms, phonetics, addr_tokens_col, addr_digits_col, addr_units_col
 
         elapsed = time.time() - start_time
         print(f"    [{self.country}] Multi-Channel Index built for {n_rows:,} records in {elapsed:.2f}s "

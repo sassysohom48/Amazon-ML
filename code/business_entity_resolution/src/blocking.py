@@ -54,30 +54,33 @@ class MultiChannelBlocker:
 
     def fit(self, s2_df: pl.DataFrame, s3_df: pl.DataFrame):
         """
-        Combines S2 + S3 target pool, computes country IDF, and fits multi-channel indexes.
+        Fits multi-channel indexes country-by-country without duplicating datasets in RAM.
         """
         print("\n" + "=" * 80)
         print("BUILDING PHASE 3 MULTI-CHANNEL RETRIEVAL INDEXES ACROSS S2 + S3 TARGETS")
         print("=" * 80)
         t0 = time.time()
 
-        # Combine S2 and S3 target records
-        target_df = pl.concat([s2_df, s3_df])
-        total_targets = len(target_df)
+        total_targets = len(s2_df) + len(s3_df)
         print(f"Total Combined Target Records: {total_targets:,}")
 
         # 1. Fit Country-Specific IDF Computer
         print("Fitting country-specific Name and Address IDF dictionaries...")
         t_idf = time.time()
-        self.idf_computer.fit_from_dataframe(target_df)
+        self.idf_computer.fit_from_dataframes(s2_df, s3_df)
         print(f"IDF dictionaries computed in {time.time() - t_idf:.2f}s.")
 
         # 2. Build Inverted Index per Country Partition
-        countries = target_df["country"].unique().to_list()
+        countries = list(set(s2_df["country"].unique().to_list()) | set(s3_df["country"].unique().to_list()))
         for country in countries:
             c_name = str(country) if country is not None else "Unknown"
             print(f"\nBuilding High-Recall Multi-Channel Index for country [{c_name}]...")
-            c_target = target_df.filter(pl.col("country") == country)
+            s2_c = s2_df.filter(pl.col("country") == country)
+            s3_c = s3_df.filter(pl.col("country") == country)
+            c_target = pl.concat([s2_c, s3_c])
+            del s2_c, s3_c
+            gc.collect()
+
             c_idx = CountryMultiChannelIndex(
                 country=c_name,
                 idf_computer=self.idf_computer,

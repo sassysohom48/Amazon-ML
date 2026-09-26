@@ -24,6 +24,52 @@ class CountryIDFComputer:
         self.addr_idf: Dict[str, Dict[str, float]] = defaultdict(dict)
         self.country_doc_counts: Dict[str, int] = defaultdict(int)
 
+    def fit_from_dataframes(self, s2_df: pl.DataFrame, s3_df: pl.DataFrame):
+        """
+        Computes country-specific name and address IDF dictionaries without duplicating DataFrames in memory.
+        """
+        countries = list(set(s2_df["country"].unique().to_list()) | set(s3_df["country"].unique().to_list()))
+
+        for country in countries:
+            c_name = str(country) if country is not None else "Unknown"
+            s2_c = s2_df.filter(pl.col("country") == country)
+            s3_c = s3_df.filter(pl.col("country") == country)
+            n_docs = len(s2_c) + len(s3_c)
+            self.country_doc_counts[c_name] = n_docs
+            max_allowed_df = int(n_docs * self.max_df_fraction)
+
+            # 1. Name Tokens IDF
+            name_counts = defaultdict(int)
+            for df_part in (s2_c, s3_c):
+                if "name_tokens" in df_part.columns:
+                    series = df_part.filter((pl.col("name_tokens") != "") & pl.col("name_tokens").is_not_null())["name_tokens"]
+                    for tok_str in series:
+                        for t in set(tok_str.split()):
+                            if len(t) >= self.min_token_len:
+                                name_counts[t] += 1
+
+            for t, df_val in name_counts.items():
+                if df_val <= max_allowed_df:
+                    idf = math.log((n_docs + 1.0) / (df_val + 1.0)) + 1.0
+                    self.name_idf[c_name][t] = idf
+
+            # 2. Address Tokens IDF
+            addr_counts = defaultdict(int)
+            for df_part in (s2_c, s3_c):
+                if "addr_tokens" in df_part.columns:
+                    series = df_part.filter((pl.col("addr_tokens") != "") & pl.col("addr_tokens").is_not_null())["addr_tokens"]
+                    for atok_str in series:
+                        for at in set(atok_str.split()):
+                            if len(at) >= self.min_token_len:
+                                addr_counts[at] += 1
+
+            for at, df_val in addr_counts.items():
+                if df_val <= max_allowed_df:
+                    idf = math.log((n_docs + 1.0) / (df_val + 1.0)) + 1.0
+                    self.addr_idf[c_name][at] = idf
+
+            del s2_c, s3_c
+
     def fit_from_dataframe(self, target_df: pl.DataFrame):
         """
         Computes country-specific name and address IDF dictionaries.

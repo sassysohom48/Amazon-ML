@@ -115,11 +115,8 @@ def run_phase_4_feature_engineering(
     # 3. Fit Country IDF Computer for weighted overlaps
     print("\nFitting Country IDF Computer for feature weighting...")
     idf_comp = CountryIDFComputer()
-    target_combined = pl.concat([s2_all, s3_all])
-    idf_comp.fit_from_dataframe(target_combined)
+    idf_comp.fit_from_dataframes(s2_all, s3_all)
     extractor = FeatureExtractor(idf_computer=idf_comp)
-    del target_combined
-    gc.collect()
 
     # 4. Strict Stratified Fold Isolation
     folds_path = PROCESSED_DIR / "train_folds.parquet"
@@ -142,6 +139,8 @@ def run_phase_4_feature_engineering(
         s1_train_sample = s1_train_eligible
 
     s1_records = {row["entity_id"]: row for row in s1_train_sample.iter_rows(named=True)}
+    del s1_all, s1_train_eligible
+    gc.collect()
 
     # Block training candidates
     print(f"Generating training candidate pairs for {len(s1_train_sample):,} entities (K = 50)...")
