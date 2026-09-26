@@ -1,242 +1,463 @@
 """
-Pairwise Feature Engineering Engine (Amazon ML Challenge 2026).
-Extracts high-dimensional lexical, structural, numeric, and fuzzy similarity metrics
-between S1 entities and candidate S2/S3 records using C++ accelerated RapidFuzz.
+Step 4.1: High-Dimensional Multi-Scale Pairwise Feature Engineering Engine (Amazon ML Challenge 2026).
+Extracts 8 comprehensive feature families (73 discriminative signals) between S1 entities and candidate S2/S3 targets:
+  - F1: Name Similarity & Asymmetric Directional Containment
+  - F2: Legal Form & Acronym Disentanglement (Separate Conflict Signals)
+  - F3: Phonetic & Sub-Word N-Grams (3-gram & 4-gram)
+  - F4: Address Hierarchy, Micro-Location & Explicit Contradictions
+  - F5: Pure Missingness Indicators & Unthresholded Conditional Similarities
+  - F6: 9-Channel Blocker Provenance & Channel Co-Occurrence
+  - F7: Joint 3-Way Consistency (Name x Address x Postal)
+  - F8: Source System & Country Context (S2 vs S3, US vs India vs France)
 """
 
-import time
-import re
-from typing import Dict, List, Tuple, Optional, Set
-import numpy as np
+import math
+from typing import Dict, List, Set, Tuple, Optional
 import polars as pl
 from rapidfuzz import fuzz, distance
 
+from src.country_idf import CountryIDFComputer
 
-FEATURE_NAMES = [
-    "name_fuzz_ratio",
-    "name_fuzz_partial_ratio",
-    "name_fuzz_token_sort_ratio",
-    "name_fuzz_token_set_ratio",
-    "name_fuzz_wratio",
-    "name_jaro_winkler",
-    "name_exact_match",
-    "name_len_diff",
-    "name_len_ratio",
-    "name_tok_jaccard",
-    "name_tok_overlap",
-    "name_tok_count_diff",
-    "addr_fuzz_ratio",
-    "addr_token_set_ratio",
-    "addr_partial_ratio",
-    "addr_tok_jaccard",
-    "addr_tok_overlap",
-    "has_addr_both",
-    "has_addr_one_missing",
-    "has_addr_both_missing",
+
+FEATURE_NAMES: List[str] = [
+    # Family 1: Name Similarity & Asymmetric Containment (17 features)
+    "name_clean_fuzz_ratio",
+    "name_clean_token_sort_ratio",
+    "name_clean_token_set_ratio",
+    "name_clean_wratio",
+    "name_clean_jaro_winkler",
+    "name_core_fuzz_ratio",
+    "name_core_token_set_ratio",
+    "name_core_jaro_winkler",
+    "name_core_exact_match",
+    "name_concat_exact_match",
+    "name_len_diff_ratio",
+    "name_first_token_similarity",
+    "name_last_token_similarity",
+    "name_containment_s1_in_tgt",
+    "name_containment_tgt_in_s1",
+    "name_idf_weighted_overlap",
+    "name_token_jaccard",
+
+    # Family 2: Legal Form & Acronym Disentanglement (5 features)
+    "legal_form_match",
+    "legal_form_both_present",
+    "legal_form_conflict",
+    "acronym_exact_match",
+    "acronym_in_name",
+
+    # Family 3: Phonetic & Sub-Word Granularity (4 features)
+    "phonetic_code_match",
+    "phonetic_similarity",
+    "char_3gram_jaccard",
+    "char_4gram_jaccard",
+
+    # Family 4: Address Hierarchy, Micro-Location & Contradictions (14 features)
+    "addr_clean_fuzz_ratio",
+    "addr_clean_token_set_ratio",
+    "addr_clean_partial_ratio",
+    "addr_token_jaccard",
+    "addr_token_overlap_count",
+    "addr_idf_weighted_overlap",
     "postal_exact_match",
-    "postal_both_present",
-    "postal_one_missing",
-    "street_num_match",
-    "name_set_x_addr_jaccard",
-    "name_wratio_x_postal",
-    "exact_name_missing_addr",
+    "postal_prefix_match",
+    "postal_conflict",
+    "unit_num_match",
+    "unit_num_conflict",
+    "house_num_match",
+    "house_num_conflict",
+    "addr_digits_jaccard",
+
+    # Family 5: Pure Missingness Indicators & Conditional Signals (9 features)
+    "target_name_missing",
+    "target_addr_missing",
+    "target_postal_missing",
+    "source_addr_missing",
+    "source_postal_missing",
+    "has_both_addr",
+    "has_both_postals",
+    "name_sim_when_target_addr_missing",
+    "addr_sim_when_target_name_missing",
+
+    # Family 6: 9-Channel Blocker Provenance & Channel Synergy (15 features)
+    "blocker_candidate_score",
+    "blocker_candidate_rank",
+    "blocker_reciprocal_rank",
+    "c_name_core",
+    "c_name_token",
+    "c_name_contain",
+    "c_char_3gram",
+    "c_acronym",
+    "c_addr_token",
+    "c_addr_numeric",
+    "c_postal",
+    "c_phonetic",
+    "num_channels",
+    "c_name_and_addr_hit",
+    "c_phonetic_and_postal_hit",
+
+    # Family 7: Joint 3-Way Consistency Interactions (4 features)
+    "name_core_x_addr_jaccard",
+    "name_core_x_postal_match",
+    "addr_fuzz_x_postal_match",
+    "three_way_consistency",
+
+    # Family 8: Source System & Country Context (5 features)
+    "is_target_s2",
+    "is_target_s3",
+    "is_country_india",
+    "is_country_us",
+    "is_country_france",
 ]
 
 
-def extract_pairwise_feature_vector(
-    s1_name: str,
-    s1_addr: str,
-    s1_tokens: set,
-    s1_addr_tokens: set,
-    s1_postals: set,
-    s1_digits: set,
-    tgt_name: str,
-    tgt_addr: str,
-    tgt_tokens: set,
-    tgt_addr_tokens: set,
-    tgt_postals: set,
-    tgt_digits: set,
-) -> List[float]:
-    """
-    Computes a 27-dimensional feature vector for a single (S1, Target) pair.
-    """
-    # 1. Fuzzy Name Metrics
-    f_ratio = fuzz.ratio(s1_name, tgt_name) / 100.0
-    f_partial = fuzz.partial_ratio(s1_name, tgt_name) / 100.0
-    f_sort = fuzz.token_sort_ratio(s1_name, tgt_name) / 100.0
-    f_set = fuzz.token_set_ratio(s1_name, tgt_name) / 100.0
-    f_wratio = fuzz.WRatio(s1_name, tgt_name) / 100.0
-    f_jaro = distance.JaroWinkler.similarity(s1_name, tgt_name)
-    exact_name = 1.0 if (s1_name and s1_name == tgt_name) else 0.0
+def extract_char_ngrams(text: str, n: int = 3) -> Set[str]:
+    """Extracts character n-grams from normalized text."""
+    if not text or len(text) < n:
+        return set()
+    clean = text.replace(" ", "")
+    if len(clean) < n:
+        return set()
+    return {clean[i:i+n] for i in range(len(clean) - n + 1)}
 
-    # 2. Name Length & Token Metrics
-    l1, l2 = len(s1_name), len(tgt_name)
-    len_diff = float(abs(l1 - l2))
-    len_ratio = (min(l1, l2) / max(l1, l2, 1)) if (l1 > 0 or l2 > 0) else 0.0
 
-    tok_inter_len = len(s1_tokens & tgt_tokens)
-    tok_union_len = len(s1_tokens | tgt_tokens)
-    tok_jaccard = (tok_inter_len / tok_union_len) if tok_union_len > 0 else 0.0
-    tok_overlap = float(tok_inter_len)
-    tok_count_diff = float(abs(len(s1_tokens) - len(tgt_tokens)))
-
-    # 3. Fuzzy Address Metrics
-    has_both_addr = 1.0 if (s1_addr and tgt_addr) else 0.0
-    has_one_missing_addr = 1.0 if (bool(s1_addr) != bool(tgt_addr)) else 0.0
-    has_both_missing_addr = 1.0 if (not s1_addr and not tgt_addr) else 0.0
-
-    if has_both_addr:
-        addr_ratio = fuzz.ratio(s1_addr, tgt_addr) / 100.0
-        addr_set_ratio = fuzz.token_set_ratio(s1_addr, tgt_addr) / 100.0
-        addr_partial = fuzz.partial_ratio(s1_addr, tgt_addr) / 100.0
-        addr_inter_len = len(s1_addr_tokens & tgt_addr_tokens)
-        addr_union_len = len(s1_addr_tokens | tgt_addr_tokens)
-        addr_jaccard = (addr_inter_len / addr_union_len) if addr_union_len > 0 else 0.0
-        addr_overlap = float(addr_inter_len)
-    else:
-        addr_ratio = 0.0
-        addr_set_ratio = 0.0
-        addr_partial = 0.0
-        addr_jaccard = 0.0
-        addr_overlap = 0.0
-
-    # 4. Postal & Numeric Metrics
-    has_both_postal = 1.0 if (s1_postals and tgt_postals) else 0.0
-    has_one_missing_postal = 1.0 if (bool(s1_postals) != bool(tgt_postals)) else 0.0
-    postal_match = 1.0 if (s1_postals and tgt_postals and (s1_postals & tgt_postals)) else 0.0
-    digit_match = 1.0 if (s1_digits and tgt_digits and (s1_digits & tgt_digits)) else 0.0
-
-    # 5. Cross Interactions
-    set_x_addr = f_set * addr_jaccard
-    postal_weight = 1.0 if postal_match else (0.75 if has_one_missing_postal else 0.25)
-    wratio_x_postal = f_wratio * postal_weight
-    exact_missing_addr = 1.0 if (exact_name > 0 and (not s1_addr or not tgt_addr)) else 0.0
-
-    return [
-        f_ratio,
-        f_partial,
-        f_sort,
-        f_set,
-        f_wratio,
-        f_jaro,
-        exact_name,
-        len_diff,
-        len_ratio,
-        tok_jaccard,
-        tok_overlap,
-        tok_count_diff,
-        addr_ratio,
-        addr_set_ratio,
-        addr_partial,
-        addr_jaccard,
-        addr_overlap,
-        has_both_addr,
-        has_one_missing_addr,
-        has_both_missing_addr,
-        postal_match,
-        has_both_postal,
-        has_one_missing_postal,
-        digit_match,
-        set_x_addr,
-        wratio_x_postal,
-        exact_missing_addr,
-    ]
+def get_country_postal_prefix(postal: str, country: str) -> str:
+    """Returns country-aware postal prefix (3 digits for India PIN, 3 digits for US ZIP, 2 for FR)."""
+    if not postal:
+        return ""
+    clean = postal.strip()
+    if country == "India":
+        return clean[:3] if len(clean) >= 3 else clean
+    elif country == "US":
+        return clean[:3] if len(clean) >= 3 else clean
+    elif country == "France":
+        return clean[:2] if len(clean) >= 2 else clean
+    return clean[:3] if len(clean) >= 3 else clean
 
 
 class FeatureExtractor:
     """
-    Ultra-low-memory, high-throughput feature extractor for candidate pairs.
-    Stores lightweight string references and parses sets on-the-fly to prevent RAM exhaustion.
+    High-Performance Pairwise Feature Extractor across all 8 feature families.
     """
 
-    def __init__(self):
-        # Stores eid -> (name_clean, addr_clean, tokens_str, postal_digits)
-        self.entity_lookup: Dict[str, Tuple[str, str, str, str]] = {}
-        self.digit_pattern = re.compile(r"\b\d+\b")
+    def __init__(self, idf_computer: Optional[CountryIDFComputer] = None):
+        self.idf_computer = idf_computer
 
-    def register_dataset(self, df: pl.DataFrame, needed_eids: Optional[Set[str]] = None):
-        """
-        Registers a Polars DataFrame using zero-copy string references (under 100MB RAM for millions of rows).
-        """
-        eids = df["entity_id"].to_list()
-        names = df["name_clean"].to_list()
-        addrs_col_name = "addr_clean" if "addr_clean" in df.columns else "address_clean"
-        addrs = df[addrs_col_name].to_list()
-        tokens = df["name_tokens"].to_list()
-        postals = df["postal_digits"].to_list()
-
-        for eid, name, addr, tok_str, post_str in zip(eids, names, addrs, tokens, postals):
-            if needed_eids is not None and eid not in needed_eids:
-                continue
-
-            self.entity_lookup[eid] = (
-                name if name else "",
-                addr if addr else "",
-                tok_str if tok_str else "",
-                post_str if post_str else "",
-            )
-
-    def extract_features_for_pairs(
+    def extract_pair_features(
         self,
-        pairs: List[Tuple[str, str]],
-        labels: Optional[List[int]] = None,
-        batch_size: int = 50000,
-    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        s1_record: Dict[str, any],
+        tgt_record: Dict[str, any],
+        provenance: Optional[Dict[str, any]] = None,
+    ) -> List[float]:
         """
-        Extracts feature matrix X for candidate pairs with zero-leakage memory footprint.
+        Computes the complete 73-dimensional feature vector for a single (S1, Target) pair.
         """
-        n_pairs = len(pairs)
-        if n_pairs == 0:
-            return np.empty((0, len(FEATURE_NAMES)), dtype=np.float32), (np.empty(0, dtype=np.int32) if labels is not None else None)
+        country = str(s1_record.get("country", "") or "")
+        tgt_id = str(tgt_record.get("entity_id", "") or "")
 
-        t0 = time.time()
-        feature_rows = []
-        valid_labels = []
+        # S1 strings & parsed attributes
+        s1_name_clean = str(s1_record.get("name_clean", "") or "")
+        s1_name_core = str(s1_record.get("name_core", "") or "")
+        s1_legal = str(s1_record.get("legal_form", "") or "NONE")
+        s1_acro = str(s1_record.get("name_acronym", "") or "")
+        s1_phone = str(s1_record.get("name_phonetic", "") or "")
+        s1_addr_clean = str(s1_record.get("addr_clean", "") or "")
+        s1_postal = str(s1_record.get("postal_clean", "") or "")
+        s1_unit = str(s1_record.get("addr_unit_num", "") or "")
+        s1_digits_str = str(s1_record.get("addr_digits", "") or "")
+        s1_primary_digit = s1_digits_str.split()[0] if s1_digits_str else ""
 
-        # Local cache for entity sets within this specific batch only (auto-collected after batch)
-        batch_set_cache: Dict[str, Tuple[str, str, set, set, set, set]] = {}
+        s1_tok_str = str(s1_record.get("name_tokens", "") or "")
+        s1_tokens = set(s1_tok_str.split()) if s1_tok_str else set(s1_name_clean.split())
+        s1_tok_list = s1_tok_str.split() if s1_tok_str else s1_name_clean.split()
+        s1_first_tok = s1_tok_list[0] if s1_tok_list else ""
+        s1_last_tok = s1_tok_list[-1] if s1_tok_list else ""
+        s1_name_concat = s1_name_clean.replace(" ", "")
 
-        for idx, (s1_id, tgt_id) in enumerate(pairs):
-            if s1_id not in self.entity_lookup or tgt_id not in self.entity_lookup:
-                continue
+        s1_atok_str = str(s1_record.get("addr_tokens", "") or "")
+        s1_atoks = set(s1_atok_str.split()) if s1_atok_str else set(s1_addr_clean.split())
+        s1_digits = set(s1_digits_str.split()) if s1_digits_str else set()
 
-            # Resolve S1 sets
-            if s1_id not in batch_set_cache:
-                s1_n, s1_a, s1_t, s1_p = self.entity_lookup[s1_id]
-                batch_set_cache[s1_id] = (
-                    s1_n,
-                    s1_a,
-                    set(s1_t.split()) if s1_t else set(),
-                    set(s1_a.split()) if s1_a else set(),
-                    set(s1_p.split()) if s1_p else set(),
-                    set(self.digit_pattern.findall(s1_a)) if s1_a else set(),
-                )
-            s1_info = batch_set_cache[s1_id]
+        # Target strings & parsed attributes
+        tgt_name_clean = str(tgt_record.get("name_clean", "") or "")
+        tgt_name_core = str(tgt_record.get("name_core", "") or "")
+        tgt_legal = str(tgt_record.get("legal_form", "") or "NONE")
+        tgt_acro = str(tgt_record.get("name_acronym", "") or "")
+        tgt_phone = str(tgt_record.get("name_phonetic", "") or "")
+        tgt_addr_clean = str(tgt_record.get("addr_clean", "") or "")
+        tgt_postal = str(tgt_record.get("postal_clean", "") or "")
+        tgt_unit = str(tgt_record.get("addr_unit_num", "") or "")
+        tgt_digits_str = str(tgt_record.get("addr_digits", "") or "")
+        tgt_primary_digit = tgt_digits_str.split()[0] if tgt_digits_str else ""
 
-            # Resolve Target sets
-            if tgt_id not in batch_set_cache:
-                tgt_n, tgt_a, tgt_t, tgt_p = self.entity_lookup[tgt_id]
-                batch_set_cache[tgt_id] = (
-                    tgt_n,
-                    tgt_a,
-                    set(tgt_t.split()) if tgt_t else set(),
-                    set(tgt_a.split()) if tgt_a else set(),
-                    set(tgt_p.split()) if tgt_p else set(),
-                    set(self.digit_pattern.findall(tgt_a)) if tgt_a else set(),
-                )
-            tgt_info = batch_set_cache[tgt_id]
+        tgt_tok_str = str(tgt_record.get("name_tokens", "") or "")
+        tgt_tokens = set(tgt_tok_str.split()) if tgt_tok_str else set(tgt_name_clean.split())
+        tgt_tok_list = tgt_tok_str.split() if tgt_tok_str else tgt_name_clean.split()
+        tgt_first_tok = tgt_tok_list[0] if tgt_tok_list else ""
+        tgt_last_tok = tgt_tok_list[-1] if tgt_tok_list else ""
+        tgt_name_concat = tgt_name_clean.replace(" ", "")
 
-            row = extract_pairwise_feature_vector(
-                s1_info[0], s1_info[1], s1_info[2], s1_info[3], s1_info[4], s1_info[5],
-                tgt_info[0], tgt_info[1], tgt_info[2], tgt_info[3], tgt_info[4], tgt_info[5],
-            )
-            feature_rows.append(row)
+        tgt_atok_str = str(tgt_record.get("addr_tokens", "") or "")
+        tgt_atoks = set(tgt_atok_str.split()) if tgt_atok_str else set(tgt_addr_clean.split())
+        tgt_digits = set(tgt_digits_str.split()) if tgt_digits_str else set()
 
-            if labels is not None:
-                valid_labels.append(labels[idx])
+        prov = provenance or {}
 
-        X = np.array(feature_rows, dtype=np.float32)
-        y = np.array(valid_labels, dtype=np.int32) if labels is not None else None
+        # =========================================================================
+        # Family 1: Name Similarity & Asymmetric Directional Containment (17 features)
+        # =========================================================================
+        name_clean_fuzz = fuzz.ratio(s1_name_clean, tgt_name_clean) / 100.0 if (s1_name_clean and tgt_name_clean) else 0.0
+        name_clean_sort = fuzz.token_sort_ratio(s1_name_clean, tgt_name_clean) / 100.0 if (s1_name_clean and tgt_name_clean) else 0.0
+        name_clean_set = fuzz.token_set_ratio(s1_name_clean, tgt_name_clean) / 100.0 if (s1_name_clean and tgt_name_clean) else 0.0
+        name_clean_wratio = fuzz.WRatio(s1_name_clean, tgt_name_clean) / 100.0 if (s1_name_clean and tgt_name_clean) else 0.0
+        name_clean_jw = distance.JaroWinkler.similarity(s1_name_clean, tgt_name_clean) if (s1_name_clean and tgt_name_clean) else 0.0
 
-        return X, y
+        name_core_fuzz = fuzz.ratio(s1_name_core, tgt_name_core) / 100.0 if (s1_name_core and tgt_name_core) else 0.0
+        name_core_set = fuzz.token_set_ratio(s1_name_core, tgt_name_core) / 100.0 if (s1_name_core and tgt_name_core) else 0.0
+        name_core_jw = distance.JaroWinkler.similarity(s1_name_core, tgt_name_core) if (s1_name_core and tgt_name_core) else 0.0
 
+        name_core_exact = 1.0 if (s1_name_core and s1_name_core == tgt_name_core) else 0.0
+        name_concat_exact = 1.0 if (s1_name_concat and len(s1_name_concat) >= 4 and s1_name_concat == tgt_name_concat) else 0.0
+
+        l1, l2 = len(s1_name_clean), len(tgt_name_clean)
+        name_len_diff_ratio = (abs(l1 - l2) / max(l1, l2, 1)) if (l1 > 0 or l2 > 0) else 0.0
+
+        name_first_tok_sim = fuzz.ratio(s1_first_tok, tgt_first_tok) / 100.0 if (s1_first_tok and tgt_first_tok) else 0.0
+        name_last_tok_sim = fuzz.ratio(s1_last_tok, tgt_last_tok) / 100.0 if (s1_last_tok and tgt_last_tok) else 0.0
+
+        name_inter = s1_tokens & tgt_tokens
+        name_union = s1_tokens | tgt_tokens
+        name_contain_s1_in_tgt = (len(name_inter) / len(s1_tokens)) if s1_tokens else 0.0
+        name_contain_tgt_in_s1 = (len(name_inter) / len(tgt_tokens)) if tgt_tokens else 0.0
+        name_tok_jaccard = (len(name_inter) / len(name_union)) if name_union else 0.0
+
+        if self.idf_computer and name_union:
+            sum_inter = sum(self.idf_computer.get_name_token_idf(country, t) for t in name_inter)
+            sum_union = sum(self.idf_computer.get_name_token_idf(country, t) for t in name_union)
+            name_idf_overlap = (sum_inter / sum_union) if sum_union > 0 else 0.0
+        else:
+            name_idf_overlap = name_tok_jaccard
+
+        # =========================================================================
+        # Family 2: Legal Form & Acronym Disentanglement (5 features)
+        # =========================================================================
+        has_s1_legal = s1_legal not in ("NONE", "")
+        has_tgt_legal = tgt_legal not in ("NONE", "")
+        legal_match = 1.0 if (has_s1_legal and has_tgt_legal and s1_legal == tgt_legal) else 0.0
+        legal_both_present = 1.0 if (has_s1_legal and has_tgt_legal) else 0.0
+        legal_conflict = 1.0 if (has_s1_legal and has_tgt_legal and s1_legal != tgt_legal) else 0.0
+
+        acro_match = 1.0 if (s1_acro and tgt_acro and s1_acro == tgt_acro) else 0.0
+        acro_in_name = 1.0 if ((s1_acro and s1_acro in tgt_tokens) or (tgt_acro and tgt_acro in s1_tokens)) else 0.0
+
+        # =========================================================================
+        # Family 3: Phonetic & Sub-Word Granularity (4 features)
+        # =========================================================================
+        phone_match = 1.0 if (s1_phone and tgt_phone and s1_phone == tgt_phone) else 0.0
+        phone_sim = (fuzz.ratio(s1_phone, tgt_phone) / 100.0) if (s1_phone and tgt_phone) else 0.0
+
+        s1_c3 = extract_char_ngrams(s1_name_core, 3)
+        tgt_c3 = extract_char_ngrams(tgt_name_core, 3)
+        c3_inter = s1_c3 & tgt_c3
+        c3_union = s1_c3 | tgt_c3
+        c3_jaccard = (len(c3_inter) / len(c3_union)) if c3_union else 0.0
+
+        s1_c4 = extract_char_ngrams(s1_name_core, 4)
+        tgt_c4 = extract_char_ngrams(tgt_name_core, 4)
+        c4_inter = s1_c4 & tgt_c4
+        c4_union = s1_c4 | tgt_c4
+        c4_jaccard = (len(c4_inter) / len(c4_union)) if c4_union else 0.0
+
+        # =========================================================================
+        # Family 4: Address Hierarchy, Micro-Location & Contradictions (14 features)
+        # =========================================================================
+        has_s1_addr = bool(s1_addr_clean)
+        has_tgt_addr = bool(tgt_addr_clean)
+        has_both_addr_val = 1.0 if (has_s1_addr and has_tgt_addr) else 0.0
+
+        if has_both_addr_val:
+            addr_fuzz = fuzz.ratio(s1_addr_clean, tgt_addr_clean) / 100.0
+            addr_set = fuzz.token_set_ratio(s1_addr_clean, tgt_addr_clean) / 100.0
+            addr_part = fuzz.partial_ratio(s1_addr_clean, tgt_addr_clean) / 100.0
+            ainter = s1_atoks & tgt_atoks
+            aunion = s1_atoks | tgt_atoks
+            addr_jaccard = (len(ainter) / len(aunion)) if aunion else 0.0
+            addr_overlap_cnt = float(len(ainter))
+            if self.idf_computer and aunion:
+                asum_inter = sum(self.idf_computer.get_addr_token_idf(country, at) for at in ainter)
+                asum_union = sum(self.idf_computer.get_addr_token_idf(country, at) for at in aunion)
+                addr_idf_overlap = (asum_inter / asum_union) if asum_union > 0 else 0.0
+            else:
+                addr_idf_overlap = addr_jaccard
+        else:
+            addr_fuzz = 0.0
+            addr_set = 0.0
+            addr_part = 0.0
+            addr_jaccard = 0.0
+            addr_overlap_cnt = 0.0
+            addr_idf_overlap = 0.0
+
+        has_s1_post = bool(s1_postal)
+        has_tgt_post = bool(tgt_postal)
+        has_both_post_val = 1.0 if (has_s1_post and has_tgt_post) else 0.0
+
+        postal_exact = 1.0 if (has_both_post_val and s1_postal == tgt_postal) else 0.0
+        s1_pfx = get_country_postal_prefix(s1_postal, country)
+        tgt_pfx = get_country_postal_prefix(tgt_postal, country)
+        postal_pfx_match = 1.0 if (s1_pfx and tgt_pfx and s1_pfx == tgt_pfx) else 0.0
+        postal_conflict = 1.0 if (has_both_post_val and s1_postal != tgt_postal) else 0.0
+
+        has_s1_u = bool(s1_unit)
+        has_tgt_u = bool(tgt_unit)
+        unit_match = 1.0 if (has_s1_u and has_tgt_u and s1_unit == tgt_unit) else 0.0
+        unit_conflict = 1.0 if (has_s1_u and has_tgt_u and s1_unit != tgt_unit) else 0.0
+
+        has_s1_dig = bool(s1_primary_digit)
+        has_tgt_dig = bool(tgt_primary_digit)
+        house_num_match = 1.0 if (has_s1_dig and has_tgt_dig and s1_primary_digit == tgt_primary_digit) else 0.0
+        house_num_conflict = 1.0 if (has_s1_dig and has_tgt_dig and s1_primary_digit != tgt_primary_digit) else 0.0
+
+        d_inter = s1_digits & tgt_digits
+        d_union = s1_digits | tgt_digits
+        addr_digits_jaccard = (len(d_inter) / len(d_union)) if d_union else 0.0
+
+        # =========================================================================
+        # Family 5: Pure Missingness Indicators & Conditional Signals (9 features)
+        # =========================================================================
+        tgt_name_missing = 1.0 if not tgt_name_clean else 0.0
+        tgt_addr_missing = 1.0 if not tgt_addr_clean else 0.0
+        tgt_post_missing = 1.0 if not tgt_postal else 0.0
+        s1_addr_missing = 1.0 if not s1_addr_clean else 0.0
+        s1_post_missing = 1.0 if not s1_postal else 0.0
+
+        name_sim_when_tgt_addr_missing = name_clean_fuzz if tgt_addr_missing else 0.0
+        addr_sim_when_tgt_name_missing = addr_fuzz if tgt_name_missing else 0.0
+
+        # =========================================================================
+        # Family 6: 9-Channel Blocker Provenance & Channel Synergy (15 features)
+        # =========================================================================
+        b_score = float(prov.get("candidate_score", 0.0))
+        b_rank = float(prov.get("candidate_rank", 60))
+        b_recip_rank = 1.0 / b_rank if b_rank > 0 else 0.0
+
+        c_name_core = float(prov.get("c_name_core", 0))
+        c_name_token = float(prov.get("c_name_token", 0))
+        c_name_contain = float(prov.get("c_name_contain", 0))
+        c_char_3gram = float(prov.get("c_char_3gram", 0))
+        c_acronym = float(prov.get("c_acronym", 0))
+        c_addr_token = float(prov.get("c_addr_token", 0))
+        c_addr_numeric = float(prov.get("c_addr_numeric", 0))
+        c_postal = float(prov.get("c_postal", 0))
+        c_phonetic = float(prov.get("c_phonetic", 0))
+        num_channels = float(prov.get("num_channels", 0))
+
+        c_name_and_addr = 1.0 if ((c_name_core or c_name_token) and (c_addr_token or c_addr_numeric)) else 0.0
+        c_phone_and_post = 1.0 if (c_phonetic and c_postal) else 0.0
+
+        # =========================================================================
+        # Family 7: Joint 3-Way Consistency Interactions (4 features)
+        # =========================================================================
+        name_x_addr = name_core_set * addr_jaccard
+        name_x_post = name_core_jw * postal_exact
+        addr_x_post = addr_fuzz * postal_exact
+        three_way = name_core_jw * addr_fuzz * postal_exact
+
+        # =========================================================================
+        # Family 8: Source System & Country Context (5 features)
+        # =========================================================================
+        is_s2 = 1.0 if tgt_id.startswith("S2") else 0.0
+        is_s3 = 1.0 if tgt_id.startswith("S3") else 0.0
+        is_in = 1.0 if country == "India" else 0.0
+        is_us = 1.0 if country == "US" else 0.0
+        is_fr = 1.0 if country == "France" else 0.0
+
+        return [
+            # F1: Name
+            name_clean_fuzz,
+            name_clean_sort,
+            name_clean_set,
+            name_clean_wratio,
+            name_clean_jw,
+            name_core_fuzz,
+            name_core_set,
+            name_core_jw,
+            name_core_exact,
+            name_concat_exact,
+            name_len_diff_ratio,
+            name_first_tok_sim,
+            name_last_tok_sim,
+            name_contain_s1_in_tgt,
+            name_contain_tgt_in_s1,
+            name_idf_overlap,
+            name_tok_jaccard,
+
+            # F2: Legal & Acronym
+            legal_match,
+            legal_both_present,
+            legal_conflict,
+            acro_match,
+            acro_in_name,
+
+            # F3: Phonetic & Sub-Word
+            phone_match,
+            phone_sim,
+            c3_jaccard,
+            c4_jaccard,
+
+            # F4: Address Hierarchy & Contradictions
+            addr_fuzz,
+            addr_set,
+            addr_part,
+            addr_jaccard,
+            addr_overlap_cnt,
+            addr_idf_overlap,
+            postal_exact,
+            postal_pfx_match,
+            postal_conflict,
+            unit_match,
+            unit_conflict,
+            house_num_match,
+            house_num_conflict,
+            addr_digits_jaccard,
+
+            # F5: Missingness
+            tgt_name_missing,
+            tgt_addr_missing,
+            tgt_post_missing,
+            s1_addr_missing,
+            s1_post_missing,
+            has_both_addr_val,
+            has_both_post_val,
+            name_sim_when_tgt_addr_missing,
+            addr_sim_when_tgt_name_missing,
+
+            # F6: Provenance
+            b_score,
+            b_rank,
+            b_recip_rank,
+            c_name_core,
+            c_name_token,
+            c_name_contain,
+            c_char_3gram,
+            c_acronym,
+            c_addr_token,
+            c_addr_numeric,
+            c_postal,
+            c_phonetic,
+            num_channels,
+            c_name_and_addr,
+            c_phone_and_post,
+
+            # F7: Interactions
+            name_x_addr,
+            name_x_post,
+            addr_x_post,
+            three_way,
+
+            # F8: Source & Country
+            is_s2,
+            is_s3,
+            is_in,
+            is_us,
+            is_fr,
+        ]
