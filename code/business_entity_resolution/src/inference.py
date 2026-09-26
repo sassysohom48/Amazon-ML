@@ -1,7 +1,11 @@
 """
-High-Throughput Test Set Inference & Submission Generation (Amazon ML Challenge 2026).
-Runs country-partitioned blocking, extracts pairwise features, applies the calibrated
-LightGBM classifier, and outputs validated TSV submissions.
+Phase 6: High-Throughput Test Set Inference & Validated Submission Engine.
+Executes the complete end-to-end inference pipeline:
+  - High-Recall Multi-Channel Blocker (Phase 3)
+  - 8-Family 73-Dimensional Pairwise Feature Extractor with Country IDF (Phase 4)
+  - Calibrated Hybrid Model Ensemble (LightGBM + CatBoost) (Phase 5)
+  - Multi-Tier Dynamic Thresholding (Country & Source Calibration + Margin Filter)
+  - Full Submission TSV Validation & Packaging
 """
 
 import os
@@ -11,9 +15,17 @@ import time
 import json
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional, Any
+import numpy as np
 import polars as pl
 import lightgbm as lgb
+
+# Optional ML library
+try:
+    import catboost as cb
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
 
 # Ensure package import works
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,41 +39,76 @@ from src.config import (
     VALIDATION_SCRIPT,
     TEST_DIR,
 )
-from src.blocking import MultiIndexBlocker
-from src.feature_engineering import FeatureExtractor
+from src.country_idf import CountryIDFComputer
+from src.blocking import MultiChannelBlocker
+from src.feature_engineering import FeatureExtractor, FEATURE_NAMES
 
 
 def run_full_inference(
     batch_size: int = 100000,
-    model_path: Path = MODELS_DIR / "lgbm_entity_resolver.txt",
-    meta_path: Path = MODELS_DIR / "model_config.json",
+    max_k_candidates: int = 50,
+    model_dir: Path = MODELS_DIR,
 ):
     """
     Executes full test set inference and generates compliant submission TSVs.
-    Processes country-by-country (France, India, US) to minimize RAM and maximize throughput.
+    Processes country-by-country (France, India, US) with strict memory bounds (< 1.5 GB).
     """
-    print("=" * 75)
-    print("PHASE 6: FULL TEST SET INFERENCE & SUBMISSION GENERATION")
-    print("=" * 75)
+    print("=" * 85)
+    print("🚀 PHASE 6: FULL MULTI-SCALE TEST INFERENCE & SUBMISSION GENERATION")
+    print("=" * 85)
+    t_start = time.time()
 
-    # 1. Load Model & Optimal Threshold
-    print(f"Loading trained LightGBM model from: {model_path}")
-    model = lgb.Booster(model_file=str(model_path))
+    # 1. Load Calibrated Models & Decision Configuration
+    config_path = model_dir / "phase5_calibration_config.json"
+    if not config_path.exists():
+        config_path = model_dir / "model_config.json"
 
-    with open(meta_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    best_thresh = config["optimal_threshold"]
-    print(f"Loaded model successfully. Applying optimal decision threshold θ* = {best_thresh:.2f}")
+    print(f"Loading Phase 5 calibration config from: {config_path.name}")
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_raw = json.load(f)
+
+    calib = config_raw.get("calibration", config_raw)
+    lgb_weight = float(calib.get("lgbm_weight", 1.0))
+    cb_weight = float(calib.get("catboost_weight", 0.0))
+    global_th = float(calib.get("global_threshold", 0.55))
+    country_ths = calib.get("country_thresholds", {"US": 0.55, "India": 0.55, "France": 0.55})
+    country_source_ths = calib.get("country_source_thresholds", {})
+    margin_gap = float(calib.get("margin_gap_threshold", 0.35))
+
+    print(f"Loaded Calibration Strategy:")
+    print(f"  • Model Blend: {lgb_weight*100:.0f}% LightGBM + {cb_weight*100:.0f}% CatBoost")
+    print(f"  • Global Fallback Threshold θ*: {global_th:.2f}")
+    print(f"  • Country Thresholds: {country_ths}")
+    if country_source_ths:
+        print(f"  • Country x Source Thresholds: {country_source_ths}")
+    print(f"  • Margin Gap Filter: {margin_gap:.2f}")
+
+    # Load LightGBM
+    lgb_path = model_dir / "lgbm_entity_resolver.txt"
+    print(f"\nLoading LightGBM model from {lgb_path.name}...")
+    lgb_model = lgb.Booster(model_file=str(lgb_path))
+
+    # Load CatBoost if present and weight > 0
+    cb_model = None
+    cb_path = model_dir / "catboost_entity_resolver.cbm"
+    if HAS_CATBOOST and cb_weight > 0 and cb_path.exists():
+        print(f"Loading CatBoost model from {cb_path.name}...")
+        cb_model = cb.CatBoostClassifier()
+        cb_model.load_model(str(cb_path))
 
     # 2. Load Test Source 1 in strict original order
-    print("\nLoading test Source 1 dataset...")
+    print("\nLoading Test Source 1 dataset...")
     t0 = time.time()
-    s1_test = pl.read_parquet(PROCESSED_DIR / "test_source1_cleaned.parquet")
+    cols_to_load = [
+        "entity_id", "country", "name_clean", "name_core", "legal_form", "name_tokens", "name_acronym",
+        "name_phonetic", "addr_clean", "addr_tokens", "addr_digits", "addr_unit_num", "postal_clean"
+    ]
+    s1_test = pl.read_parquet(PROCESSED_DIR / "test_source1_cleaned.parquet", columns=cols_to_load)
     all_s1_ids = s1_test["entity_id"].to_list()
     total_s1 = len(all_s1_ids)
-    print(f"Loaded {total_s1:,} Test Source 1 entities in {time.time() - t0:.2f}s")
+    print(f"Loaded {total_s1:,} Test Source 1 entities in {time.time() - t0:.2f}s.")
 
-    # Storage for all entity results (preserving exact row order)
+    # Storage for output predictions
     s1_to_candidates: Dict[str, List[str]] = {}
     s1_to_matches: Dict[str, List[str]] = {}
 
@@ -70,9 +117,9 @@ def run_full_inference(
 
     # 3. Country-by-Country Partitioned Processing
     for country in countries:
-        print("\n" + "-" * 75)
-        print(f"PROCESSING PARTITION: {country.upper()}")
-        print("-" * 75)
+        print("\n" + "=" * 80)
+        print(f"🌍 PROCESSING PARTITION: {country.upper()}")
+        print("=" * 80)
         t_country = time.time()
 
         # Slice country S1
@@ -87,81 +134,133 @@ def run_full_inference(
         t_load = time.time()
         s2_country = pl.read_parquet(
             PROCESSED_DIR / "test_source2_cleaned.parquet",
-            columns=["entity_id", "country", "name_clean", "addr_clean", "name_tokens", "postal_digits", "has_address"],
+            columns=cols_to_load,
         ).filter(pl.col("country") == country)
 
         s3_country = pl.read_parquet(
             PROCESSED_DIR / "test_source3_cleaned.parquet",
-            columns=["entity_id", "country", "name_clean", "addr_clean", "name_tokens", "postal_digits", "has_address"],
+            columns=cols_to_load,
         ).filter(pl.col("country") == country)
 
         print(f"  • Loaded Targets in {time.time() - t_load:.2f}s: S2={len(s2_country):,}, S3={len(s3_country):,}")
 
-        # Build Inverted Index Blocker for this country
-        print(f"  • Building Multi-Index Blocker for {country} targets...")
-        blocker = MultiIndexBlocker(max_candidates=35, max_token_freq=4000)
+        # Fit Country IDF Computer
+        print(f"  • Fitting Country IDF for {country}...")
+        idf_comp = CountryIDFComputer()
+        idf_comp.fit_from_dataframes(s2_country, s3_country)
+
+        # Build Multi-Channel Blocker
+        print(f"  • Building Multi-Channel Retrieval Blocker for {country} (K={max_k_candidates})...")
+        t_block_fit = time.time()
+        blocker = MultiChannelBlocker(max_candidates=max_k_candidates)
         blocker.fit(s2_country, s3_country)
+        print(f"  • Blocker index built in {time.time() - t_block_fit:.2f}s.")
 
         # Generate candidates for S1
-        print(f"  • Generating candidate pairs for {len(s1_c_ids):,} entities...")
+        print(f"  • Blocking {len(s1_c_ids):,} entities...")
         t_block = time.time()
-        cands_map = blocker.block_s1(s1_country)
-        print(f"  • Blocking completed in {time.time() - t_block:.2f}s ({len(s1_c_ids)/(time.time() - t_block):,.0f} ent/s)")
+        cands_dict = blocker.block_dataframe(s1_country, max_k=max_k_candidates)
+        print(f"  • Blocking completed in {time.time() - t_block:.2f}s ({len(s1_c_ids)/(time.time() - t_block):,.0f} ent/s).")
 
-        # Flatten pairs for batched feature extraction and collect needed target IDs
-        pairs_to_score: List[Tuple[str, str]] = []
+        # Collect needed target IDs and format candidate lists
+        flat_pairs: List[Tuple[str, str, Dict[str, Any]]] = []
         needed_target_ids: Set[str] = set()
-        for s1_id in s1_c_ids:
-            cands = cands_map.get(s1_id, [])
-            s1_to_candidates[s1_id] = cands
-            for tgt_id in cands:
-                pairs_to_score.append((s1_id, tgt_id))
+
+        for s1_id, c_list in cands_dict.items():
+            tgt_list = [c["target_id"] for c in c_list]
+            s1_to_candidates[s1_id] = tgt_list
+            for c in c_list:
+                tgt_id = c["target_id"]
+                prov_dict = {k: c[k] for k in c if k != "target_id"}
+                flat_pairs.append((s1_id, tgt_id, prov_dict))
                 needed_target_ids.add(tgt_id)
 
-        print(f"  • Total candidate pairs to score in {country}: {len(pairs_to_score):,} ({len(needed_target_ids):,} unique targets)")
-        total_candidate_pairs_scored += len(pairs_to_score)
+        print(f"  • Candidate Pairs to score in {country}: {len(flat_pairs):,} ({len(needed_target_ids):,} unique targets).")
+        total_candidate_pairs_scored += len(flat_pairs)
 
-        # Register only relevant entities in Feature Extractor (10x speedup!)
-        print(f"  • Initializing feature lookup cache for {len(s1_c_ids) + len(needed_target_ids):,} active entities...")
-        extractor = FeatureExtractor()
-        extractor.register_dataset(s1_country)
-        extractor.register_dataset(s2_country, needed_eids=needed_target_ids)
-        extractor.register_dataset(s3_country, needed_eids=needed_target_ids)
+        # Build lazy target record lookup cache
+        print(f"  • Caching {len(needed_target_ids):,} active target records in memory...")
+        s2_filtered = s2_country.filter(pl.col("entity_id").is_in(needed_target_ids))
+        s3_filtered = s3_country.filter(pl.col("entity_id").is_in(needed_target_ids))
+        del s2_country, s3_country, blocker
+        gc.collect()
+
+        s1_records = {row["entity_id"]: row for row in s1_country.iter_rows(named=True)}
+        s2_records = {row["entity_id"]: row for row in s2_filtered.iter_rows(named=True)}
+        s3_records = {row["entity_id"]: row for row in s3_filtered.iter_rows(named=True)}
+        tgt_records = {**s2_records, **s3_records}
+        del s2_filtered, s3_filtered, s2_records, s3_records
+        gc.collect()
 
         # Batch Feature Extraction & Scoring
-        pair_probabilities: Dict[Tuple[str, str], float] = {}
+        print(f"  • Extracting 73 features and predicting probabilities in batches of {batch_size:,}...")
+        extractor = FeatureExtractor(idf_computer=idf_comp)
+        s1_scored_candidates: Dict[str, List[Tuple[str, float, str]]] = defaultdict(list)
         t_score = time.time()
 
-        for idx in range(0, len(pairs_to_score), batch_size):
-            chunk = pairs_to_score[idx : idx + batch_size]
-            X_chunk, _ = extractor.extract_features_for_pairs(chunk)
-            probs = model.predict(X_chunk)
-            for pair, prob in zip(chunk, probs):
-                pair_probabilities[pair] = float(prob)
-            
-            if (idx // batch_size) % 5 == 0 or idx + batch_size >= len(pairs_to_score):
-                print(f"    Scored {min(idx + batch_size, len(pairs_to_score)):,} / {len(pairs_to_score):,} pairs...")
+        for idx in range(0, len(flat_pairs), batch_size):
+            chunk = flat_pairs[idx : idx + batch_size]
+            feat_rows = []
+            for s1_id, tgt_id, prov in chunk:
+                s1_rec = s1_records.get(s1_id, {})
+                tgt_rec = tgt_records.get(tgt_id, {})
+                feat_rows.append(extractor.extract_pair_features(s1_rec, tgt_rec, prov))
 
-        print(f"  • Scoring completed in {time.time() - t_score:.2f}s ({len(pairs_to_score)/(time.time() - t_score):,.0f} pairs/s)")
+            X_chunk = np.array(feat_rows, dtype=np.float32)
+            p_lgb_chunk = lgb_model.predict(X_chunk)
 
-        # Filter matches with optimal threshold θ*
+            if cb_model is not None and cb_weight > 0:
+                p_cb_chunk = cb_model.predict_proba(X_chunk)[:, 1]
+                p_chunk = lgb_weight * p_lgb_chunk + cb_weight * p_cb_chunk
+            else:
+                p_chunk = p_lgb_chunk
+
+            for (s1_id, tgt_id, _), prob in zip(chunk, p_chunk):
+                tgt_src = "S2" if tgt_id.startswith("S2") else "S3"
+                s1_scored_candidates[s1_id].append((tgt_id, float(prob), tgt_src))
+
+            if (idx // batch_size) % 5 == 0 or idx + batch_size >= len(flat_pairs):
+                speed = min(idx + batch_size, len(flat_pairs)) / (time.time() - t_score)
+                print(f"    Scored {min(idx + batch_size, len(flat_pairs)):,} / {len(flat_pairs):,} pairs ({speed:,.0f} pairs/s)...")
+
+        print(f"  • Scoring completed in {time.time() - t_score:.2f}s.")
+
+        # Apply Calibrated Dynamic Thresholds & Margin Filter
+        c_th_default = country_ths.get(country, global_th)
+        c_source_dict = country_source_ths.get(country, {})
+
         for s1_id in s1_c_ids:
-            cands = s1_to_candidates.get(s1_id, [])
-            matched = [
-                tgt_id for tgt_id in cands
-                if pair_probabilities.get((s1_id, tgt_id), 0.0) >= best_thresh
-            ]
+            scored_list = s1_scored_candidates.get(s1_id, [])
+            if not scored_list:
+                s1_to_matches[s1_id] = []
+                continue
+
+            # Sort candidates by probability descending
+            scored_list.sort(key=lambda x: x[1], reverse=True)
+            top_prob = scored_list[0][1]
+
+            matched = []
+            for rank_idx, (tgt_id, p, tgt_src) in enumerate(scored_list):
+                # Specific threshold for (country, source) or country default
+                req_th = c_source_dict.get(tgt_src, c_th_default)
+
+                if p >= req_th:
+                    # Margin gap suppression for secondary candidates
+                    if rank_idx > 0 and (top_prob - p) > margin_gap:
+                        continue
+                    matched.append(tgt_id)
+
             s1_to_matches[s1_id] = matched
 
         # Explicit RAM cleanup
-        del s2_country, s3_country, blocker, extractor, pairs_to_score, pair_probabilities, cands_map
+        del s1_records, tgt_records, flat_pairs, s1_scored_candidates, cands_dict, extractor, idf_comp
         gc.collect()
-        print(f"  Partition {country} finished in {time.time() - t_country:.2f}s")
+        print(f"  Partition {country} finished in {time.time() - t_country:.2f}s.")
 
     # 4. Stream Results to Compliant TSV Files in Strict S1 Order
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 85)
     print("WRITING OFFICIAL SUBMISSION TSVs")
-    print("=" * 75)
+    print("=" * 85)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     matching_out = SUBMISSION_MATCHING_TSV
@@ -202,9 +301,9 @@ def run_full_inference(
     print(f"  • Singletons Defended:        {singletons_count:,} ({singletons_count/total_s1*100:.2f}%)")
 
     # 5. Automated Submission Validation Harness
-    print("\n" + "=" * 75)
-    print("PHASE 7: RUNNING OFFICIAL SUBMISSION VALIDATOR")
-    print("=" * 75)
+    print("\n" + "=" * 85)
+    print("RUNNING OFFICIAL SUBMISSION VALIDATOR")
+    print("=" * 85)
 
     val_cmd = [
         sys.executable,
@@ -220,6 +319,9 @@ def run_full_inference(
     print(result.stdout)
     if result.stderr:
         print(result.stderr)
+
+    total_time = time.time() - t_start
+    print(f"\n🎉 FULL INFERENCE COMPLETED IN {total_time:.2f}s!")
 
     if result.returncode == 0:
         print("[SUCCESS] All validation rules passed! Ready for official leaderboard submission.")
