@@ -1,97 +1,139 @@
 """
-Fast Diagnostic Script: Analyze Missed True Matches in Blocking.
+Step 3.5: Forensic Miss Diagnostic Script (Amazon ML Challenge 2026).
+Loads generated validation candidate pairs and identifies the root cause of any missed Ground Truth links:
+- Missing Token overlap?
+- Truncation by channel cap?
+- Acronym / Phonetic gap?
 """
 
 import sys
 from pathlib import Path
+from collections import defaultdict
 from typing import Dict, Set, List
 import polars as pl
+from rapidfuzz import fuzz
 
 # Ensure package import works
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import PROCESSED_DIR
+from src.config import PROCESSED_DIR, TRAIN_DIR
 
 
-def diagnose_misses(sample_size: int = 25):
-    print("=" * 70)
-    print("DIAGNOSING MISSED TRUE MATCHES IN BLOCKING")
-    print("=" * 70)
+def diagnose_misses(sample_size: int = 20):
+    print("=" * 85)
+    print("FORENSIC INSPECTION OF MISSED GROUND TRUTH TARGET PAIRS")
+    print("=" * 85)
 
-    val_s1_path = PROCESSED_DIR / "val_source1_cleaned.parquet"
-    val_gt_path = PROCESSED_DIR / "val_ground_truth.parquet"
     cand_pairs_path = PROCESSED_DIR / "val_candidate_pairs.parquet"
+    gt_path = PROCESSED_DIR / "train_ground_truth.parquet"
+    if not gt_path.exists():
+        gt_path = TRAIN_DIR / "train_ground_truth.tsv"
 
-    val_gt = pl.read_parquet(val_gt_path)
-    cand_df = pl.read_parquet(cand_pairs_path)
+    print(f"Reading Candidates from {cand_pairs_path.name}...")
+    cand_df = pl.read_parquet(cand_pairs_path, columns=["source1_entity_id", "target_entity_id"])
 
-    cand_map = {}
+    cand_map = defaultdict(set)
     for row in cand_df.iter_rows():
-        s1_id, cands = row[0], row[1]
-        cand_map[s1_id] = set(cands.split(",")) if cands else set()
+        cand_map[row[0]].add(row[1])
 
+    val_s1_eids = set(cand_map.keys())
+    print(f"Total Validation Entities with Candidates: {len(val_s1_eids):,}")
+
+    # Load Ground Truth
+    print(f"Loading Ground Truth from {gt_path}...")
+    if str(gt_path).endswith(".parquet"):
+        gt_df = pl.read_parquet(gt_path)
+    else:
+        gt_df = pl.read_csv(gt_path, separator="\t")
+
+    s1_col = gt_df.columns[0]
+    tgt_col = gt_df.columns[1]
+    for c in gt_df.columns:
+        if c in ("source1_entity_id", "source_entity_id", "s1_id"):
+            s1_col = c
+        elif c in ("matched_entity_ids", "matched_entity_id", "target_entity_id", "s2_id", "s3_id", "target_id"):
+            tgt_col = c
+
+    # Filter GT to only validation entities
     missed_pairs = []
-    for row in val_gt.iter_rows():
-        s1_id, matches = row[0], row[1]
-        if not matches or not str(matches).strip():
+    total_val_gt_pairs = 0
+    captured_val_gt_pairs = 0
+
+    for row in gt_df.iter_rows(named=True):
+        s1 = str(row[s1_col]).strip()
+        if s1 not in val_s1_eids:
             continue
-        cands = cand_map.get(s1_id, set())
-        for tgt_id in str(matches).strip().split(","):
-            tgt_id = tgt_id.strip()
-            if tgt_id and tgt_id not in cands:
-                missed_pairs.append((s1_id, tgt_id))
 
-    print(f"Total Missed True Matches: {len(missed_pairs):,} / 763,889 ({len(missed_pairs)/763889*100:.2f}%)")
+        cands = cand_map[s1]
+        targets_raw = str(row[tgt_col]).strip()
+        for tid in targets_raw.split(","):
+            tid_clean = tid.strip()
+            if not tid_clean:
+                continue
+            total_val_gt_pairs += 1
+            if tid_clean in cands:
+                captured_val_gt_pairs += 1
+            else:
+                missed_pairs.append((s1, tid_clean))
 
-    # Sample missed pairs
-    sampled = missed_pairs[:sample_size]
-    sample_s1_ids = [p[0] for p in sampled]
-    sample_tgt_ids = [p[1] for p in sampled]
+    pair_recall = (captured_val_gt_pairs / total_val_gt_pairs * 100.0) if total_val_gt_pairs > 0 else 0
+    print("\n" + "=" * 85)
+    print(f"VALIDATION CANDIDATE RECALL METRICS (Fold 0, K=50):")
+    print(f"  • Total True Target Pairs in Val: {total_val_gt_pairs:,}")
+    print(f"  • Captured True Target Pairs:     {captured_val_gt_pairs:,} ({pair_recall:.2f}%)")
+    print(f"  • Missed True Target Pairs:       {len(missed_pairs):,} ({100.0 - pair_recall:.2f}%)")
+    print("=" * 85)
 
-    val_s1 = pl.read_parquet(val_s1_path).filter(pl.col("entity_id").is_in(sample_s1_ids))
-    s1_dict = {row["entity_id"]: row for row in val_s1.iter_rows(named=True)}
+    # Detailed Inspection of Sample Misses
+    sample_misses = missed_pairs[:sample_size]
+    sample_s1_ids = [p[0] for p in sample_misses]
+    sample_tgt_ids = [p[1] for p in sample_misses]
 
-    train_s2 = pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet").filter(pl.col("entity_id").is_in(sample_tgt_ids))
-    train_s3 = pl.read_parquet(PROCESSED_DIR / "train_source3_cleaned.parquet").filter(pl.col("entity_id").is_in(sample_tgt_ids))
+    cols_to_load = ["entity_id", "country", "name_clean", "name_core", "name_tokens", "addr_clean", "postal_clean", "addr_tokens", "addr_digits"]
+    
+    s1_records = {row["entity_id"]: row for row in pl.read_parquet(PROCESSED_DIR / "train_source1_cleaned.parquet", columns=cols_to_load).filter(pl.col("entity_id").is_in(sample_s1_ids)).iter_rows(named=True)}
+    
+    s2_records = {row["entity_id"]: row for row in pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet", columns=cols_to_load).filter(pl.col("entity_id").is_in(sample_tgt_ids)).iter_rows(named=True)}
+    s3_records = {row["entity_id"]: row for row in pl.read_parquet(PROCESSED_DIR / "train_source3_cleaned.parquet", columns=cols_to_load).filter(pl.col("entity_id").is_in(sample_tgt_ids)).iter_rows(named=True)}
+    tgt_records = {**s2_records, **s3_records}
 
-    target_dict = {}
-    for row in train_s2.iter_rows(named=True):
-        target_dict[row["entity_id"]] = row
-    for row in train_s3.iter_rows(named=True):
-        target_dict[row["entity_id"]] = row
+    print(f"\nDETAILED FORENSIC AUDIT OF {len(sample_misses)} MISSED TARGET PAIRS:")
+    print("=" * 85)
 
-    print(f"\nDetailed Inspection of {len(sampled)} Missed True Pairs:")
-    print("=" * 70)
+    for i, (s1_id, tgt_id) in enumerate(sample_misses, 1):
+        s1 = s1_records.get(s1_id, {})
+        tgt = tgt_records.get(tgt_id, {})
 
-    for i, (s1_id, tgt_id) in enumerate(sampled, 1):
-        s1_rec = s1_dict.get(s1_id, {})
-        tgt_rec = target_dict.get(tgt_id, {})
+        s1_name = s1.get("name_clean", "")
+        tgt_name = tgt.get("name_clean", "")
+        s1_core = s1.get("name_core", "")
+        tgt_core = tgt.get("name_core", "")
+        s1_addr = s1.get("addr_clean", "")
+        tgt_addr = tgt.get("addr_clean", "")
+        s1_post = s1.get("postal_clean", "")
+        tgt_post = tgt.get("postal_clean", "")
 
-        print(f"\n[{i}] S1 ID: {s1_id} | Country: {s1_rec.get('country')}")
-        print(f"    S1 Name Clean:       '{s1_rec.get('name_clean')}'")
-        print(f"    S1 Name Raw:         '{s1_rec.get('name')}'")
-        print(f"    S1 Tokens:           {s1_rec.get('name_tokens')}")
-        print(f"    S1 Address Clean:    '{s1_rec.get('address_clean')}'")
-        print(f"    S1 Postal:           '{s1_rec.get('postal_digits')}'")
-        print(f"    --- vs ---")
-        print(f"    Target ID:           {tgt_id}")
-        print(f"    Target Name Clean:   '{tgt_rec.get('name_clean')}'")
-        print(f"    Target Name Raw:     '{tgt_rec.get('name')}'")
-        print(f"    Target Tokens:       {tgt_rec.get('name_tokens')}")
-        print(f"    Target Address Clean:'{tgt_rec.get('address_clean')}'")
-        print(f"    Target Postal:       '{tgt_rec.get('postal_digits')}'")
+        name_fuzz = fuzz.token_set_ratio(s1_name, tgt_name) if s1_name and tgt_name else 0
+        addr_fuzz = fuzz.token_set_ratio(s1_addr, tgt_addr) if s1_addr and tgt_addr else 0
 
-        s1_toks = set(s1_rec.get('name_tokens', '').split())
-        tgt_toks = set(tgt_rec.get('name_tokens', '').split())
-        shared_name_toks = s1_toks & tgt_toks
+        s1_toks = set(s1.get("name_tokens", "").split())
+        tgt_toks = set(tgt.get("name_tokens", "").split())
+        shared_name = s1_toks & tgt_toks
 
-        s1_addr_toks = set(s1_rec.get('address_clean', '').split())
-        tgt_addr_toks = set(tgt_rec.get('address_clean', '').split())
-        shared_addr_toks = s1_addr_toks & tgt_addr_toks
+        s1_atoks = set(s1.get("addr_tokens", "").split())
+        tgt_atoks = set(tgt.get("addr_tokens", "").split())
+        shared_addr = s1_atoks & tgt_atoks
 
-        print(f"    Shared Name Tokens:    {shared_name_toks}")
-        print(f"    Shared Address Tokens: {list(shared_addr_toks)[:6]}")
+        print(f"\n[{i}] S1: {s1_id} vs Target: {tgt_id} [{s1.get('country')}]")
+        print(f"    S1 Name:     '{s1_name}'  (Core: '{s1_core}')")
+        print(f"    Tgt Name:    '{tgt_name}' (Core: '{tgt_core}')  [Fuzz Ratio: {name_fuzz}%]")
+        print(f"    S1 Address:  '{s1_addr}'  (Postal: '{s1_post}')")
+        print(f"    Tgt Address: '{tgt_addr}' (Postal: '{tgt_post}') [Fuzz Ratio: {addr_fuzz}%]")
+        print(f"    Shared Tokens: Name={shared_name or 'None'} | Addr={list(shared_addr)[:4] or 'None'}")
 
 
 if __name__ == "__main__":
-    diagnose_misses(25)
+    n = 20
+    if len(sys.argv) > 1:
+        n = int(sys.argv[1])
+    diagnose_misses(n)
