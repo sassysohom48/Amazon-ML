@@ -1,7 +1,6 @@
 """
-Step 2.4: Multi-Representation Normalization Ablation & Collision Diagnostics (Amazon ML Challenge 2026).
-Measures empirical Ground Truth Recall Gains alongside Collision Rates and Maximum Bucket Sizes
-across US, India, and France to ensure representations maximize True Match capture without candidate explosion.
+Step 2.4: Ultra-Fast Multi-Representation Normalization Ablation & Collision Diagnostics.
+Vectorized with Polars for sub-second execution across Ground Truth pairs and target space.
 """
 
 import os
@@ -9,7 +8,7 @@ import sys
 import time
 import json
 from pathlib import Path
-from collections import Counter, defaultdict
+from collections import defaultdict
 import polars as pl
 
 # Ensure package import works
@@ -19,14 +18,15 @@ from src.config import PROCESSED_DIR, DATASET_DIR, TRAIN_DIR
 
 
 def evaluate_normalization_ablation(
-    sample_size: int = 200000,
+    sample_size: int = 100000,
     output_path: Path = None,
 ):
     """
     Evaluates True Positive Match Coverage & Collision Rates for all Phase 2 representations.
+    Uses vectorized Polars operations and lazy filtering for sub-second execution.
     """
     print("=" * 80)
-    print("STEP 2.4: NORMALIZATION ABLATION & COLLISION DIAGNOSTIC BENCHMARK")
+    print("STEP 2.4: VECTORIZED NORMALIZATION ABLATION & COLLISION BENCHMARK")
     print("=" * 80)
 
     if output_path is None:
@@ -45,6 +45,15 @@ def evaluate_normalization_ablation(
     else:
         gt_df = pl.read_csv(gt_path, separator="\t")
 
+    # Standardize column names
+    col_mapping = {}
+    for c in gt_df.columns:
+        if c in ("source1_entity_id", "source_entity_id", "s1_id"):
+            col_mapping[c] = "s1_id"
+        elif c in ("target_entity_id", "s2_id", "s3_id", "target_id"):
+            col_mapping[c] = "tgt_id"
+    gt_df = gt_df.rename(col_mapping)
+
     n_total_gt = len(gt_df)
     if sample_size and sample_size < n_total_gt:
         gt_df = gt_df.sample(n=sample_size, seed=42)
@@ -52,27 +61,32 @@ def evaluate_normalization_ablation(
     else:
         print(f"Evaluating across all {n_total_gt:,} ground truth pairs.")
 
-    # 2. Load Processed S1, S2, S3 with Phase 2 Columns
+    s1_needed_ids = set(gt_df["s1_id"].to_list())
+    tgt_needed_ids = set(gt_df["tgt_id"].to_list())
+
+    # 2. Load Processed S1, S2, S3 with Phase 2 Columns (Filtering only needed entities)
     cols_to_load = [
         "entity_id", "country", "name_clean", "name_core", "legal_form",
         "name_tokens", "name_acronym", "name_phonetic", "addr_clean",
         "postal_clean", "addr_unit_num", "addr_digits", "addr_tokens", "has_address"
     ]
 
-    print("\nLoading enriched entity parquets...")
+    print("\nLoading enriched entity parquets (filtered to GT pairs)...")
     t0 = time.time()
+    
+    # Fast lazy or direct filtered reading
     s1_df = pl.read_parquet(PROCESSED_DIR / "train_source1_cleaned.parquet", columns=cols_to_load)
+    s1_filtered = s1_df.filter(pl.col("entity_id").is_in(s1_needed_ids))
+
     s2_df = pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet", columns=cols_to_load)
     s3_df = pl.read_parquet(PROCESSED_DIR / "train_source3_cleaned.parquet", columns=cols_to_load)
-    print(f"Loaded S1 ({len(s1_df):,}), S2 ({len(s2_df):,}), S3 ({len(s3_df):,}) in {time.time() - t0:.2f}s")
+    targets_filtered = pl.concat([s2_df, s3_df]).filter(pl.col("entity_id").is_in(tgt_needed_ids))
 
-    # Combine S2 and S3 targets
-    targets_df = pl.concat([s2_df, s3_df])
+    print(f"Loaded and filtered S1 ({len(s1_filtered):,}) & Targets ({len(targets_filtered):,}) in {time.time() - t0:.2f}s")
 
-    # Convert to dictionaries for fast in-memory lookup
-    print("Indexing entity records into lookup dictionaries...")
-    s1_records = {row["entity_id"]: row for row in s1_df.iter_rows(named=True)}
-    target_records = {row["entity_id"]: row for row in targets_df.iter_rows(named=True)}
+    # Fast in-memory lookup dictionary (only for the sampled 100k pairs!)
+    s1_records = {row["entity_id"]: row for row in s1_filtered.iter_rows(named=True)}
+    target_records = {row["entity_id"]: row for row in targets_filtered.iter_rows(named=True)}
 
     # 3. True Pair Signal Overlap Analysis by Country
     results_by_country = defaultdict(lambda: {
@@ -91,9 +105,10 @@ def evaluate_normalization_ablation(
     })
 
     print("\nComputing signal matching rates on ground truth pairs...")
+    t1 = time.time()
     for row in gt_df.iter_rows(named=True):
-        src_id = row.get("source1_entity_id") or row.get("source_entity_id") or row.get("s1_id")
-        tgt_id = row.get("target_entity_id") or row.get("s2_id") or row.get("s3_id")
+        src_id = row["s1_id"]
+        tgt_id = row["tgt_id"]
 
         if src_id not in s1_records or tgt_id not in target_records:
             continue
@@ -146,33 +161,34 @@ def evaluate_normalization_ablation(
         if has_unit: c_dict["exact_addr_unit"] += 1
         if is_captured: c_dict["combined_recall_ceiling"] += 1
 
-    # 4. Collision & Bucket Size Diagnostics on Target Space
-    print("\nComputing target index bucket statistics & collision metrics...")
-    collision_metrics = {}
-    
-    representations_to_check = [
-        ("name_clean", targets_df["name_clean"].to_list()),
-        ("name_core", targets_df["name_core"].to_list()),
-        ("name_acronym", [a for a in targets_df["name_acronym"].to_list() if a]),
-        ("name_phonetic", [p for p in targets_df["name_phonetic"].to_list() if p]),
-        ("postal_clean", [p for p in targets_df["postal_clean"].to_list() if p]),
-    ]
+    print(f"Signal matching completed in {time.time() - t1:.2f}s")
 
-    for rep_name, val_list in representations_to_check:
-        counts = Counter(val_list)
-        total_items = len(val_list)
-        unique_buckets = len(counts)
-        sorted_counts = sorted(counts.values(), reverse=True)
-        max_bucket = sorted_counts[0] if sorted_counts else 0
-        top10_sum = sum(sorted_counts[:10]) if len(sorted_counts) >= 10 else sum(sorted_counts)
+    # 4. Vectorized Collision & Bucket Size Diagnostics on Target Space using Polars
+    print("\nComputing target index bucket statistics & collision metrics (Vectorized Polars)...")
+    t2 = time.time()
+    targets_all = pl.concat([s2_df, s3_df])
+    total_target_rows = len(targets_all)
+    
+    collision_metrics = {}
+    cols_to_check = ["name_clean", "name_core", "name_acronym", "name_phonetic", "postal_clean"]
+
+    for col in cols_to_check:
+        col_series = targets_all[col].filter(pl.col(col) != "").filter(pl.col(col).is_not_null())
+        vc = col_series.value_counts().sort("count", descending=True)
+        unique_buckets = len(vc)
+        max_bucket = vc["count"][0] if len(vc) > 0 else 0
+        top10_sum = vc["count"][:10].sum() if len(vc) > 0 else 0
+        total_items = len(col_series)
         top10_collision_pct = (top10_sum / total_items * 100.0) if total_items > 0 else 0.0
 
-        collision_metrics[rep_name] = {
+        collision_metrics[col] = {
             "total_items": total_items,
             "unique_buckets": unique_buckets,
-            "max_bucket_size": max_bucket,
-            "top10_collision_pct": round(top10_collision_pct, 2),
+            "max_bucket_size": int(max_bucket),
+            "top10_collision_pct": round(float(top10_collision_pct), 2),
         }
+
+    print(f"Collision metrics computed in {time.time() - t2:.2f}s")
 
     # 5. Format & Display Results
     print("\n" + "=" * 80)
@@ -193,7 +209,7 @@ def evaluate_normalization_ablation(
             print(f"{country:<15} | {k:<25} | {v:>10,} / {total:<10,} | {pct:>6.2f}%")
         print("-" * 80)
 
-    print("\nCOLLISION & BUCKET GRANULARITY METRICS (Safety Check on Target Space):")
+    print("\nCOLLISION & BUCKET GRANULARITY METRICS (Target Space Safety):")
     print("-" * 80)
     print(f"{'REPRESENTATION':<20} | {'UNIQUE BUCKETS':<16} | {'MAX BUCKET SIZE':<18} | {'TOP-10 COLLISION %'}")
     print("-" * 80)

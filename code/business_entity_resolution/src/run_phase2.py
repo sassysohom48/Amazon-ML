@@ -16,14 +16,14 @@ from src.preprocess_datasets import run_full_preprocessing
 from src.ablation_normalization import evaluate_normalization_ablation
 
 
-def run_phase2_pipeline(force_recompute: bool = True):
+def run_phase2_pipeline(force_recompute: bool = False):
     print("=" * 80)
     print("🚀 EXECUTING PHASE 2: MULTI-REPRESENTATION NORMALIZATION & PARSING")
     print("=" * 80)
     t_start = time.time()
 
     # Step 2.1 - 2.3: Streamed Multi-Representation Preprocessing
-    print("\n[1/2] RUNNING LOW-MEMORY STREAMING PREPROCESSING (Steps 2.1 - 2.3)...")
+    print("\n[1/2] CHECKING / RUNNING STREAMING PREPROCESSING (Steps 2.1 - 2.3)...")
     run_full_preprocessing(force_recompute=force_recompute)
 
     # Step 2.4: Normalization Ablation & Collision Diagnostic Benchmark
@@ -53,5 +53,5 @@ def run_phase2_pipeline(force_recompute: bool = True):
 
 
 if __name__ == "__main__":
-    force = "--no-force" not in sys.argv
+    force = "--force" in sys.argv
     run_phase2_pipeline(force_recompute=force)
