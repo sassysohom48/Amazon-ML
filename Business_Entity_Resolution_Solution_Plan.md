@@ -241,21 +241,27 @@ For every candidate pair $(S_1, S_{2/3})$, extracted 27 discriminative pairwise 
 
 ---
 
-### Phase 5 — Model Training, Hard Negative Mining & Macro $F_{0.5}$ Calibration
+### Phase 5 — Model Training, Hard Negative Mining & Macro $F_{0.5}$ Calibration `[COMPLETED ✅]`
 
 1. **Training Sample Construction:**
    * **Positives:** All true ground truth pairs $(S_1, S_2)$ and $(S_1, S_3)$.
    * **Easy Negatives:** Random non-matching pairs from blocking candidates.
-   * **Hard Negatives:** High-similarity non-matches (e.g. same business name at different address, or different businesses at the same address).
-   * **Sampling Ratio:** $1 \text{ Positive} : 4 \text{ Negatives}$.
-2. **Model Training (LightGBM / CatBoost on SageMaker/EC2):**
-   * Train multi-threaded GBDT binary classifier with Early Stopping on validation macro $F_{0.5}$.
-   * High-priority precision tuning via class weight penalty on false positives.
+   * **Hard Negatives:** High-similarity non-matches (same business name at different address, or different businesses at the same address).
+   * **Sampling Ratio:** $1 \text{ Positive} : 4 \text{ Negatives}$ ($350,000$ pairs total).
+2. **Model Training (LightGBM GBDT):**
+   * Built and trained 300-tree LightGBM binary classifier (`lgbm_entity_resolver.txt`, 2.08 MB) on 27 pairwise RapidFuzz/token features.
+   * Class weights and loss function optimized for high precision.
 3. **Macro $F_{0.5}$ Threshold Optimization & Singleton Defense:**
-   * Sweep decision threshold $\theta \in [0.50, 0.95]$ with step $0.01$.
-   * Select optimal threshold $\theta^*$ that maximizes exact **macro $F_{0.5}$** across all validation S1 entities.
-   * **Singleton Gatekeeper:** If an S1 entity has all candidate probabilities $< \theta^*$, output an empty match list `""` (earning full $1.0$ score on singletons).
-   * Save model artifacts and optimal threshold parameters to `s3://.../models/`.
+   * Calibrated decision threshold on validation set: **$\theta^* = \mathbf{0.65}$**.
+   * **Validation Performance Achieved:**
+     * **Macro $F_{0.5}$ Score:** **`0.6112`**
+     * **Macro Precision:** **`71.01%`**
+     * **Macro Recall:** `46.84%`
+   * **Singleton Gatekeeper:** If an S1 entity has all candidate probabilities $< \theta^*$, outputs an empty match list `""` to secure a perfect $1.0$ score on singletons.
+   * **Synced Artifacts to S3:**
+     * `s3://amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon/shared/models/lgbm_entity_resolver.txt`
+     * `s3://amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon/shared/models/model_config.json`
+
 
 ---
 
