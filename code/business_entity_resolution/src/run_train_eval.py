@@ -20,6 +20,13 @@ from collections import defaultdict
 from typing import Dict, List, Set, Tuple, Optional, Any
 import numpy as np
 import polars as pl
+import lightgbm as lgb
+
+try:
+    import catboost as cb
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
 
 # Ensure package import works
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,7 +41,6 @@ from src.train_model import (
     MultiTierCalibrator,
     compute_oof_disagreement_matrix,
     save_phase5_artifacts,
-    HAS_CATBOOST,
 )
 
 
@@ -220,7 +226,7 @@ def prepare_validation_candidate_features(
     gc.collect()
 
     # 4. Extract Pairwise Features for Validation Pairs
-    print(f"Extracting {len(extractor.feature_names)} features for {len(flat_s1):,} validation candidate pairs...")
+    print(f"Extracting {len(FEATURE_NAMES)} features for {len(flat_s1):,} validation candidate pairs...")
     t_feat = time.time()
     val_features = []
     val_countries = []
@@ -251,45 +257,63 @@ def prepare_validation_candidate_features(
     return X_val, flat_s1, flat_tgt, val_countries, val_sources, eval_gt_map
 
 
-def run_phase_5_pipeline(max_val_entities: int = 35000):
+def run_phase_5_pipeline(max_val_entities: int = 35000, force_retrain: bool = False):
     print("=" * 85)
     print("🏆 EXECUTING PHASE 5: HYBRID MODEL TRAINING & OOF CALIBRATION MATRIX")
     print("=" * 85)
     t_total_start = time.time()
 
-    # 1. Load Training Data
-    X_tr, y_tr, X_va, y_va, feature_names = load_or_prepare_training_data()
+    lgb_path = MODELS_DIR / "lgbm_entity_resolver.txt"
+    cb_path = MODELS_DIR / "catboost_entity_resolver.cbm"
+    feature_names = FEATURE_NAMES
 
-    # 2. Train LightGBM Model
-    lgb_model, lgb_importances = train_lightgbm_model(
-        X_train=X_tr,
-        y_train=y_tr,
-        X_val=X_va,
-        y_val=y_va,
-        feature_names=feature_names,
-        num_boost_round=600,
-        early_stopping_rounds=50,
-    )
+    # Check if pre-trained models already exist on disk
+    if lgb_path.exists() and not force_retrain:
+        print(f"\nFound existing trained LightGBM checkpoint: {lgb_path.name}. Loading from disk...")
+        lgb_model = lgb.Booster(model_file=str(lgb_path))
+        print(f"[OK] Loaded LightGBM Booster ({lgb_model.num_trees()} trees).")
 
-    # 3. Train CatBoost Model (if available)
-    cb_model, cb_importances = train_catboost_model(
-        X_train=X_tr,
-        y_train=y_tr,
-        X_val=X_va,
-        y_val=y_va,
-        feature_names=feature_names,
-        iterations=600,
-        early_stopping_rounds=50,
-    )
+        if HAS_CATBOOST and cb_path.exists():
+            print(f"Found existing trained CatBoost checkpoint: {cb_path.name}. Loading from disk...")
+            cb_model = cb.CatBoostClassifier()
+            cb_model.load_model(str(cb_path))
+            print(f"[OK] Loaded CatBoost Classifier.")
+        else:
+            cb_model = None
+    else:
+        # 1. Load Training Data
+        X_tr, y_tr, X_va, y_va, feature_names = load_or_prepare_training_data()
 
-    # Save trained model checkpoints immediately to disk
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    lgb_model.save_model(str(MODELS_DIR / "lgbm_entity_resolver.txt"))
-    if cb_model is not None:
-        cb_model.save_model(str(MODELS_DIR / "catboost_entity_resolver.cbm"))
+        # 2. Train LightGBM Model
+        lgb_model, lgb_importances = train_lightgbm_model(
+            X_train=X_tr,
+            y_train=y_tr,
+            X_val=X_va,
+            y_val=y_va,
+            feature_names=feature_names,
+            num_boost_round=600,
+            early_stopping_rounds=50,
+        )
 
-    del X_tr, y_tr, X_va, y_va
-    gc.collect()
+        # 3. Train CatBoost Model (if available)
+        cb_model, cb_importances = train_catboost_model(
+            X_train=X_tr,
+            y_train=y_tr,
+            X_val=X_va,
+            y_val=y_va,
+            feature_names=feature_names,
+            iterations=600,
+            early_stopping_rounds=50,
+        )
+
+        # Save trained model checkpoints immediately to disk
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        lgb_model.save_model(str(MODELS_DIR / "lgbm_entity_resolver.txt"))
+        if cb_model is not None:
+            cb_model.save_model(str(MODELS_DIR / "catboost_entity_resolver.cbm"))
+
+        del X_tr, y_tr, X_va, y_va
+        gc.collect()
 
     # 4. Prepare Out-of-Fold Validation Set
     X_val, flat_s1, flat_tgt, val_countries, val_sources, eval_gt_map = prepare_validation_candidate_features(
@@ -549,7 +573,10 @@ def run_phase_5_pipeline(max_val_entities: int = 35000):
 
 if __name__ == "__main__":
     n_val = 35000
+    force_retrain = False
     for arg in sys.argv[1:]:
         if arg.isdigit():
             n_val = int(arg)
-    run_phase_5_pipeline(max_val_entities=n_val)
+        elif arg.lower() in ("--retrain", "-r", "retrain"):
+            force_retrain = True
+    run_phase_5_pipeline(max_val_entities=n_val, force_retrain=force_retrain)

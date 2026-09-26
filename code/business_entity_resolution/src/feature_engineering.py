@@ -196,6 +196,7 @@ class FeatureExtractor:
 
     def __init__(self, idf_computer: Optional[CountryIDFComputer] = None):
         self.idf_computer = idf_computer
+        self.feature_names = FEATURE_NAMES
 
     def extract_pair_features(
         self,
