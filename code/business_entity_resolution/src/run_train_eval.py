@@ -431,28 +431,59 @@ def run_phase_5_pipeline(max_val_entities: int = 35000):
     }
 
     # -------------------------------------------------------------------------
-    # Experiment 5F: Contradiction & Margin Post-Processing Gatekeeper
+    # Experiment 5F: Asymmetric Contradiction Gate & Margin Post-Processing
     # -------------------------------------------------------------------------
-    print("\n[EXPERIMENT 5F] Margin Post-Processing Gatekeeper Evaluation:")
+    print("\n[EXPERIMENT 5F] Asymmetric Contradiction & Margin Post-Processing:")
     best_margin_gap = 0.35
-    res_5f = calibrator.evaluate_post_processing_rules(
+    res_5f_margin = calibrator.evaluate_post_processing_rules(
         country_thresholds=country_ths,
         margin_gap_threshold=best_margin_gap,
         probs_override=best_p_blend,
     )
-    print(f"  • Macro F0.5 with Margin Filter (gap = {best_margin_gap:.2f}): {res_5f['macro_f05']:.4f}")
+    print(f"  • Macro F0.5 with Margin Filter (gap = {best_margin_gap:.2f}): {res_5f_margin['macro_f05']:.4f}")
+
+    res_5f_asym = calibrator.evaluate_asymmetric_contradiction_rules(
+        country_thresholds=country_ths,
+        feature_matrix=X_val,
+        feature_names=feature_names,
+        probs_override=best_p_blend,
+    )
+    print(f"  • Macro F0.5 with Asymmetric Contradiction Gate: {res_5f_asym['macro_f05']:.4f}")
+
+    res_5f = res_5f_asym if res_5f_asym["macro_f05"] >= res_5f_margin["macro_f05"] else res_5f_margin
 
     experiments_log["Exp_5F_Post_Processing_Gatekeeper"] = {
-        "description": "Margin gap candidate suppression post-processing",
+        "description": "Asymmetric contradiction and margin gatekeeper",
         "margin_gap_threshold": best_margin_gap,
+        "metrics_margin": res_5f_margin,
+        "metrics_asymmetric": res_5f_asym,
         "metrics": res_5f,
     }
+
+    # -------------------------------------------------------------------------
+    # Experiment 5G: OOF Disagreement Analysis (Boundary Region [0.75, 0.95])
+    # -------------------------------------------------------------------------
+    if cb_model is not None:
+        print("\n[EXPERIMENT 5G] OOF Model Disagreement Analysis:")
+        # Build validation labels for pairs with ground truth
+        val_labels = np.array([
+            1 if flat_tgt[i] in eval_gt_map.get(flat_s1[i], set()) else 0
+            for i in range(len(flat_s1))
+        ], dtype=np.int8)
+
+        disagree_stats = compute_oof_disagreement_matrix(
+            p_lgb=p_lgb,
+            p_cb=p_cb,
+            labels=val_labels,
+            decision_threshold=th_5a,
+        )
+        experiments_log["Exp_5G_OOF_Disagreement"] = disagree_stats
 
     # =========================================================================
     # 7. COMPARATIVE BENCHMARK SUMMARY & LOSS ATTRIBUTION
     # =========================================================================
     print("\n" + "=" * 90)
-    print("📊 PHASE 5 SCIENTIFIC BENCHMARK & EXPERIMENT COMPARISON TABLE")
+    print("📊 PHASE 5.5 SCIENTIFIC BENCHMARK & EXPERIMENT COMPARISON TABLE")
     print("=" * 90)
     print(f"{'EXPERIMENT':<35} | {'MACRO F0.5':<11} | {'PRECISION':<11} | {'RECALL':<10} | {'SINGLETON ACC'}")
     print("-" * 90)
@@ -462,12 +493,12 @@ def run_phase_5_pipeline(max_val_entities: int = 35000):
         print(f"{'5C: Learned Ensemble Blend (w*)':<35} | {best_blend_res['macro_f05']:>10.4f}  | {best_blend_res['macro_precision']*100:>9.2f}%  | {best_blend_res['macro_recall']*100:>8.2f}%  | {best_blend_res['singleton_accuracy']*100:>12.2f}%")
     print(f"{'5D: Country Calibration (θ_C*)':<35} | {res_5d['macro_f05']:>10.4f}  | {res_5d['macro_precision']*100:>9.2f}%  | {res_5d['macro_recall']*100:>8.2f}%  | {res_5d['singleton_accuracy']*100:>12.2f}%")
     print(f"{'5E: Country x Source (θ_C,S*)':<35} | {res_5e['macro_f05']:>10.4f}  | {res_5e['macro_precision']*100:>9.2f}%  | {res_5e['macro_recall']*100:>8.2f}%  | {res_5e['singleton_accuracy']*100:>12.2f}%")
-    print(f"{'5F: Post-Processing Gatekeeper':<35} | {res_5f['macro_f05']:>10.4f}  | {res_5f['macro_precision']*100:>9.2f}%  | {res_5f['macro_recall']*100:>8.2f}%  | {res_5f['singleton_accuracy']*100:>12.2f}%")
+    print(f"{'5F: Asymmetric Contradiction Gate':<35} | {res_5f['macro_f05']:>10.4f}  | {res_5f['macro_precision']*100:>9.2f}%  | {res_5f['macro_recall']*100:>8.2f}%  | {res_5f['singleton_accuracy']*100:>12.2f}%")
     print("=" * 90)
 
     # Determine Winning Calibration Strategy
-    best_strategy_name = "Exp_5D_Country_Calibration"
-    best_val_f05 = res_5d["macro_f05"]
+    best_strategy_name = "Exp_5E_Country_Source_Calibration"
+    best_val_f05 = res_5e["macro_f05"]
     best_config_meta = {
         "lgbm_weight": best_w,
         "catboost_weight": 1.0 - best_w if cb_model is not None else 0.0,
@@ -476,17 +507,18 @@ def run_phase_5_pipeline(max_val_entities: int = 35000):
         "country_source_thresholds": country_source_ths,
         "margin_gap_threshold": best_margin_gap,
         "best_macro_f05": best_val_f05,
-        "best_precision": res_5d["macro_precision"],
-        "best_recall": res_5d["macro_recall"],
-        "singleton_accuracy": res_5d["singleton_accuracy"],
+        "best_precision": res_5e["macro_precision"],
+        "best_recall": res_5e["macro_recall"],
+        "singleton_accuracy": res_5e["singleton_accuracy"],
     }
 
-    if res_5e["macro_f05"] > best_val_f05:
-        best_strategy_name = "Exp_5E_Country_Source_Calibration"
-        best_val_f05 = res_5e["macro_f05"]
     if res_5f["macro_f05"] > best_val_f05:
-        best_strategy_name = "Exp_5F_Post_Processing_Gatekeeper"
+        best_strategy_name = "Exp_5F_Asymmetric_Contradiction_Gate"
         best_val_f05 = res_5f["macro_f05"]
+        best_config_meta["best_macro_f05"] = best_val_f05
+        best_config_meta["best_precision"] = res_5f["macro_precision"]
+        best_config_meta["best_recall"] = res_5f["macro_recall"]
+        best_config_meta["singleton_accuracy"] = res_5f["singleton_accuracy"]
 
     print(f"\n🏆 WINNING CONFIGURATION: {best_strategy_name} (Peak Macro F0.5: {best_val_f05:.4f})")
 

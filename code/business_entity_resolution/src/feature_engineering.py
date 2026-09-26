@@ -1,14 +1,14 @@
 """
-Step 4.1: High-Dimensional Multi-Scale Pairwise Feature Engineering Engine (Amazon ML Challenge 2026).
-Extracts 8 comprehensive feature families (73 discriminative signals) between S1 entities and candidate S2/S3 targets:
-  - F1: Name Similarity & Asymmetric Directional Containment
-  - F2: Legal Form & Acronym Disentanglement (Separate Conflict Signals)
-  - F3: Phonetic & Sub-Word N-Grams (3-gram & 4-gram)
-  - F4: Address Hierarchy, Micro-Location & Explicit Contradictions
-  - F5: Pure Missingness Indicators & Unthresholded Conditional Similarities
-  - F6: 9-Channel Blocker Provenance & Channel Co-Occurrence
-  - F7: Joint 3-Way Consistency (Name x Address x Postal)
-  - F8: Source System & Country Context (S2 vs S3, US vs India vs France)
+Step 4.1 & Phase 5.5: High-Dimensional Multi-Scale Pairwise Feature Engineering Engine.
+Extracts 8 comprehensive feature families (82 discriminative signals) between S1 entities and candidate S2/S3 targets:
+  - F1: Name Similarity & Asymmetric Directional Containment (17 features)
+  - F2: Legal Form & Algorithmic Acronym Disentanglement (7 features)
+  - F3: Phonetic, Sub-Word N-Grams & Consonant Skeletons (6 features)
+  - F4: Address Hierarchy, Structured Locality, Landmarks & Contradictions (16 features)
+  - F5: Pure Missingness Indicators & Unthresholded Conditional Similarities (9 features)
+  - F6: 9-Channel Blocker Provenance & Channel Co-Occurrence (15 features)
+  - F7: Multi-Tier Hierarchical Exact Match Anchors & Cross-Interactions (7 features)
+  - F8: Source System & Country Context (5 features)
 """
 
 import math
@@ -39,26 +39,32 @@ FEATURE_NAMES: List[str] = [
     "name_idf_weighted_overlap",
     "name_token_jaccard",
 
-    # Family 2: Legal Form & Acronym Disentanglement (5 features)
+    # Family 2: Legal Form & Algorithmic Acronym Disentanglement (7 features)
     "legal_form_match",
     "legal_form_both_present",
     "legal_form_conflict",
     "acronym_exact_match",
     "acronym_in_name",
+    "acronym_initials_s1_in_tgt",
+    "acronym_initials_tgt_in_s1",
 
-    # Family 3: Phonetic & Sub-Word Granularity (4 features)
+    # Family 3: Phonetic, Sub-Word & Consonant Skeletons (6 features)
     "phonetic_code_match",
     "phonetic_similarity",
     "char_3gram_jaccard",
     "char_4gram_jaccard",
+    "name_consonant_skeleton_sim",
+    "name_consonant_skeleton_exact",
 
-    # Family 4: Address Hierarchy, Micro-Location & Contradictions (14 features)
+    # Family 4: Address Hierarchy, Structured Locality & Contradictions (16 features)
     "addr_clean_fuzz_ratio",
     "addr_clean_token_set_ratio",
     "addr_clean_partial_ratio",
     "addr_token_jaccard",
     "addr_token_overlap_count",
     "addr_idf_weighted_overlap",
+    "addr_locality_jaccard",
+    "addr_landmark_jaccard",
     "postal_exact_match",
     "postal_prefix_match",
     "postal_conflict",
@@ -96,11 +102,14 @@ FEATURE_NAMES: List[str] = [
     "c_name_and_addr_hit",
     "c_phonetic_and_postal_hit",
 
-    # Family 7: Joint 3-Way Consistency Interactions (4 features)
+    # Family 7: Multi-Tier Hierarchical Anchors & Interactions (7 features)
     "name_core_x_addr_jaccard",
     "name_core_x_postal_match",
     "addr_fuzz_x_postal_match",
     "three_way_consistency",
+    "exact_core_name_and_postal",
+    "exact_core_name_and_house",
+    "exact_core_name_and_locality",
 
     # Family 8: Source System & Country Context (5 features)
     "is_target_s2",
@@ -109,6 +118,51 @@ FEATURE_NAMES: List[str] = [
     "is_country_us",
     "is_country_france",
 ]
+
+
+# Structured Locality & Landmark Keywords for Non-Destructive Parsing
+LOCALITY_KEYWORDS: Set[str] = {
+    "nagar", "colony", "layout", "phase", "sector", "sec", "vihar", "enclave",
+    "society", "soc", "mohalla", "puram", "wadi", "pada", "baug", "bazaar",
+    "bazar", "mandi", "market", "park", "village", "gram", "taluka", "dist",
+    "district", "suburb", "hills", "gardens", "heights", "town", "ward",
+}
+
+LANDMARK_KEYWORDS: Set[str] = {
+    "opp", "opposite", "nr", "near", "adj", "adjacent", "behind", "bh", "bd",
+    "beside", "front", "above", "below", "temple", "mandir", "masjid", "church",
+    "station", "stn", "railway", "bus", "stand", "stop", "depot", "bridge",
+    "cross", "circle", "chowk", "corner", "gate", "hospital", "school", "college",
+    "petrol", "pump", "bank",
+}
+
+VOWELS_SET: Set[str] = set("aeiouyAEIOUY ")
+
+
+def extract_consonant_skeleton(text: str) -> str:
+    """
+    Extracts vowel-stripped, deduplicated consonant skeleton for transliteration invariance.
+    e.g. 'Venkateshwara' -> 'vnktshwr', 'Venkateswara' -> 'vnktswr'
+    """
+    if not text:
+        return ""
+    consonants = [c for c in text if c not in VOWELS_SET and c.isalnum()]
+    dedup = []
+    for c in consonants:
+        if not dedup or dedup[-1] != c:
+            dedup.append(c)
+    return "".join(dedup).lower()
+
+
+def match_acronym_initials(acro: str, tokens: List[str]) -> float:
+    """
+    Algorithmic multi-token acronym match: checks if acronym characters match
+    the initials of consecutive tokens without requiring hardcoded dictionaries.
+    """
+    if not acro or len(acro) < 2 or not tokens:
+        return 0.0
+    initials = "".join(t[0] for t in tokens if t).lower()
+    return 1.0 if acro.lower() in initials else 0.0
 
 
 def extract_char_ngrams(text: str, n: int = 3) -> Set[str]:
@@ -137,7 +191,7 @@ def get_country_postal_prefix(postal: str, country: str) -> str:
 
 class FeatureExtractor:
     """
-    High-Performance Pairwise Feature Extractor across all 8 feature families.
+    High-Performance Pairwise Feature Extractor across all 8 feature families (82 signals).
     """
 
     def __init__(self, idf_computer: Optional[CountryIDFComputer] = None):
@@ -150,7 +204,7 @@ class FeatureExtractor:
         provenance: Optional[Dict[str, any]] = None,
     ) -> List[float]:
         """
-        Computes the complete 73-dimensional feature vector for a single (S1, Target) pair.
+        Computes the complete 82-dimensional feature vector for a single (S1, Target) pair.
         """
         country = str(s1_record.get("country", "") or "")
         tgt_id = str(tgt_record.get("entity_id", "") or "")
@@ -204,7 +258,7 @@ class FeatureExtractor:
         prov = provenance or {}
 
         # =========================================================================
-        # Family 1: Name Similarity & Asymmetric Directional Containment (17 features)
+        # Family 1: Name Similarity & Asymmetric Containment (17 features)
         # =========================================================================
         name_clean_fuzz = fuzz.ratio(s1_name_clean, tgt_name_clean) / 100.0 if (s1_name_clean and tgt_name_clean) else 0.0
         name_clean_sort = fuzz.token_sort_ratio(s1_name_clean, tgt_name_clean) / 100.0 if (s1_name_clean and tgt_name_clean) else 0.0
@@ -239,7 +293,7 @@ class FeatureExtractor:
             name_idf_overlap = name_tok_jaccard
 
         # =========================================================================
-        # Family 2: Legal Form & Acronym Disentanglement (5 features)
+        # Family 2: Legal Form & Algorithmic Acronym Disentanglement (7 features)
         # =========================================================================
         has_s1_legal = s1_legal not in ("NONE", "")
         has_tgt_legal = tgt_legal not in ("NONE", "")
@@ -250,8 +304,12 @@ class FeatureExtractor:
         acro_match = 1.0 if (s1_acro and tgt_acro and s1_acro == tgt_acro) else 0.0
         acro_in_name = 1.0 if ((s1_acro and s1_acro in tgt_tokens) or (tgt_acro and tgt_acro in s1_tokens)) else 0.0
 
+        # Algorithmic Initial Matching (No Hardcoded Dictionary)
+        acro_init_s1_in_tgt = match_acronym_initials(s1_acro, tgt_tok_list)
+        acro_init_tgt_in_s1 = match_acronym_initials(tgt_acro, s1_tok_list)
+
         # =========================================================================
-        # Family 3: Phonetic & Sub-Word Granularity (4 features)
+        # Family 3: Phonetic, Sub-Word & Consonant Skeletons (6 features)
         # =========================================================================
         phone_match = 1.0 if (s1_phone and tgt_phone and s1_phone == tgt_phone) else 0.0
         phone_sim = (fuzz.ratio(s1_phone, tgt_phone) / 100.0) if (s1_phone and tgt_phone) else 0.0
@@ -268,12 +326,29 @@ class FeatureExtractor:
         c4_union = s1_c4 | tgt_c4
         c4_jaccard = (len(c4_inter) / len(c4_union)) if c4_union else 0.0
 
+        # Consonant Skeleton Transliteration Feature
+        s1_skel = extract_consonant_skeleton(s1_name_core)
+        tgt_skel = extract_consonant_skeleton(tgt_name_core)
+        consonant_skel_sim = (fuzz.ratio(s1_skel, tgt_skel) / 100.0) if (s1_skel and tgt_skel) else 0.0
+        consonant_skel_exact = 1.0 if (s1_skel and s1_skel == tgt_skel) else 0.0
+
         # =========================================================================
-        # Family 4: Address Hierarchy, Micro-Location & Contradictions (14 features)
+        # Family 4: Address Hierarchy, Structured Locality & Contradictions (16 features)
         # =========================================================================
         has_s1_addr = bool(s1_addr_clean)
         has_tgt_addr = bool(tgt_addr_clean)
         has_both_addr_val = 1.0 if (has_s1_addr and has_tgt_addr) else 0.0
+
+        # Locality and Landmark sub-token analysis
+        s1_loc = s1_atoks & LOCALITY_KEYWORDS
+        tgt_loc = tgt_atoks & LOCALITY_KEYWORDS
+        loc_union = s1_loc | tgt_loc
+        addr_loc_jaccard = (len(s1_loc & tgt_loc) / len(loc_union)) if loc_union else 0.0
+
+        s1_land = s1_atoks & LANDMARK_KEYWORDS
+        tgt_land = tgt_atoks & LANDMARK_KEYWORDS
+        land_union = s1_land | tgt_land
+        addr_land_jaccard = (len(s1_land & tgt_land) / len(land_union)) if land_union else 0.0
 
         if has_both_addr_val:
             addr_fuzz = fuzz.ratio(s1_addr_clean, tgt_addr_clean) / 100.0
@@ -355,12 +430,17 @@ class FeatureExtractor:
         c_phone_and_post = 1.0 if (c_phonetic and c_postal) else 0.0
 
         # =========================================================================
-        # Family 7: Joint 3-Way Consistency Interactions (4 features)
+        # Family 7: Multi-Tier Hierarchical Anchors & Interactions (7 features)
         # =========================================================================
         name_x_addr = name_core_set * addr_jaccard
         name_x_post = name_core_jw * postal_exact
         addr_x_post = addr_fuzz * postal_exact
         three_way = name_core_jw * addr_fuzz * postal_exact
+
+        # Multi-Tier Exact Anchors
+        exact_core_and_postal = 1.0 if (name_core_exact == 1.0 and postal_exact == 1.0) else 0.0
+        exact_core_and_house = 1.0 if (name_core_exact == 1.0 and house_num_match == 1.0) else 0.0
+        exact_core_and_loc = 1.0 if (name_core_exact == 1.0 and bool(s1_loc & tgt_loc)) else 0.0
 
         # =========================================================================
         # Family 8: Source System & Country Context (5 features)
@@ -397,20 +477,26 @@ class FeatureExtractor:
             legal_conflict,
             acro_match,
             acro_in_name,
+            acro_init_s1_in_tgt,
+            acro_init_tgt_in_s1,
 
-            # F3: Phonetic & Sub-Word
+            # F3: Phonetic & Sub-Word & Consonant Skeletons
             phone_match,
             phone_sim,
             c3_jaccard,
             c4_jaccard,
+            consonant_skel_sim,
+            consonant_skel_exact,
 
-            # F4: Address Hierarchy & Contradictions
+            # F4: Address Hierarchy, Locality & Contradictions
             addr_fuzz,
             addr_set,
             addr_part,
             addr_jaccard,
             addr_overlap_cnt,
             addr_idf_overlap,
+            addr_loc_jaccard,
+            addr_land_jaccard,
             postal_exact,
             postal_pfx_match,
             postal_conflict,
@@ -448,11 +534,14 @@ class FeatureExtractor:
             c_name_and_addr,
             c_phone_and_post,
 
-            # F7: Interactions
+            # F7: Multi-Tier Anchors & Interactions
             name_x_addr,
             name_x_post,
             addr_x_post,
             three_way,
+            exact_core_and_postal,
+            exact_core_and_house,
+            exact_core_and_loc,
 
             # F8: Source & Country
             is_s2,
