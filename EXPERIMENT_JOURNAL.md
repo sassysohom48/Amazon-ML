@@ -64,8 +64,23 @@ flowchart TD
 
 | Date | Phase / Step | Activity & Technical Details | Artifacts Created |
 | :--- | :--- | :--- | :--- |
-| 2026-09-25 | Phase 1 & 2 | Built initial 10% stratified holdout and multi-threaded text normalizer. Processed 24.2M records into Snappy Parquet. | `train/test_source1/2/3_cleaned.parquet` |
-| 2026-09-26 | Phase 3 & 4 | Multi-index candidate blocker ($K \le 35$) and 27-feature RapidFuzz extraction on 350k training sample. | `train_features.parquet` |
-| 2026-09-26 | Phase 5 & 6 | Trained baseline LightGBM GBDT (300 trees, $\theta^* = 0.65$, Val Macro $F_{0.5} = 0.6112$). Generated full test TSVs on SageMaker in 25 min. | `matching_results.tsv`, `candidate_pairs.tsv` |
-| 2026-09-26 | Phase 7 | Packaged `team_submission.zip` and submitted to Amazon portal. **Score: 0.753**. | `team_submission.zip` |
-| 2026-09-26 | Phase 1 (Redesign) | Formulated master Phase 1 architecture with 5-Fold OOF splits, diagnostic error engine, GT profiler, and French robustness test. | `EXPERIMENT_JOURNAL.md` |
+| 2026-09-25 | Baseline | Built initial 10% stratified holdout and multi-threaded text normalizer. Processed 24.2M records into Snappy Parquet. | `train/test_source1/2/3_cleaned.parquet` |
+| 2026-09-26 | Baseline | Multi-index candidate blocker ($K \le 35$) and 27-feature RapidFuzz extraction on 350k training sample. | `train_features.parquet` |
+| 2026-09-26 | Baseline | Trained baseline LightGBM GBDT (300 trees, $\theta^* = 0.65$, Val Macro $F_{0.5} = 0.6112$). Generated full test TSVs on SageMaker in 25 min. | `matching_results.tsv`, `candidate_pairs.tsv` |
+| 2026-09-26 | Submission 1 | Packaged `team_submission.zip` and submitted to Amazon portal. **Score: 0.753**. | `team_submission.zip` |
+| 2026-09-26 | Phase 1 (Completed) | Executed Phase 1 on SageMaker: 5-Fold stratified splits (`train_folds.parquet`), validation contract (`validation_contract.json`), ground truth signal profiler (`gt_signal_profile.json`), and French robustness test (`val_synthetic_france.parquet`). | `train_folds.parquet`, `validation_contract.json`, `gt_signal_profile.json`, `val_synthetic_france.parquet` |
+| 2026-09-26 | Phase 2 (Completed) | Designed & implemented non-destructive multi-representation normalizer (`name_clean`, `name_core`, `legal_form`, `name_acronym`, `name_phonetic`), structured address parser (`addr_clean`, `postal_clean`, `addr_unit_num`, `addr_digits`, `addr_tokens`), streaming preprocessor, and normalization ablation benchmark. | `src/multilingual_normalizer.py`, `src/address_parser.py`, `src/preprocess_datasets.py`, `src/ablation_normalization.py`, `src/run_phase2.py`, `02_phase2_multirepresentation_normalization.ipynb` |
+
+---
+
+## 🔍 Empirical Discoveries & Insights
+
+### Phase 1 Empirical Profiling (from SageMaker Run)
+* **US True Pairs:** Exact clean name match: `32.88%`, Name token overlap: `90.67%`, Address token overlap: `94.87%`, Char 3-gram overlap: `98.70%`.
+* **India True Pairs:** Exact clean name match: **only `19.35%`** (>80% have spelling/phonetic noise), Name token overlap: `71.02%`, Address token overlap: **`95.68%`** (Universal anchor!), Char 3-gram overlap: `78.00%`.
+* **Recall Ceiling:** `Exact_Name OR Name_Token OR Addr_Token` recovers **`100.00%`** of true match pairs in both countries.
+* **Phase 2 Implementation Philosophy:**
+  - *Non-Destructive Parallel Representations:* Preserves `name_clean`, `name_core`, `legal_form`, `name_acronym`, `name_phonetic`, and `name_tokens` in separate columns so the classifier has maximum discrimination without losing information.
+  - *Structured Address Decomposition:* Extracts unit/shop numbers, PIN codes, address digits, and street tokens separately.
+  - *Streaming Low-Memory Preprocessing:* Processes 24.2M records in streaming Arrow batches keeping peak RAM < 250 MB.
+

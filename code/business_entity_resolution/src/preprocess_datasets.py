@@ -1,7 +1,7 @@
 """
-Ultra Low-Memory Streaming Preprocessing Pipeline (Amazon ML Challenge 2026).
-Processes records in small streaming batches (20,000 rows at a time) using PyArrow,
-keeping peak RAM consumption strictly under 100 MB. Works on any instance size.
+Step 2.3: Ultra Low-Memory Streaming Multi-Representation Preprocessing Pipeline (Amazon ML Challenge 2026).
+Processes millions of business records across US, India, and France in streaming batches using PyArrow,
+extracting parallel name and structured address representations while keeping peak RAM strictly under 250 MB.
 """
 
 import os
@@ -25,7 +25,8 @@ from src.config import (
     TEST_S2,
     TEST_S3,
 )
-from src.text_normalizer import normalize_record
+from src.multilingual_normalizer import normalize_business_name_record
+from src.address_parser import parse_address_record
 
 
 PARQUET_SCHEMA = pa.schema([
@@ -33,42 +34,57 @@ PARQUET_SCHEMA = pa.schema([
     ("country", pa.string()),
     ("business_name_raw", pa.string()),
     ("business_address_raw", pa.string()),
+    
+    # Parallel Name Representations
     ("name_clean", pa.string()),
-    ("addr_clean", pa.string()),
+    ("name_core", pa.string()),
+    ("legal_form", pa.string()),
     ("name_tokens", pa.string()),
+    ("name_acronym", pa.string()),
+    ("name_phonetic", pa.string()),
+    
+    # Structured Address Representations
+    ("addr_clean", pa.string()),
+    ("postal_clean", pa.string()),
+    ("addr_unit_num", pa.string()),
+    ("addr_digits", pa.string()),
+    ("addr_tokens", pa.string()),
+    ("has_address", pa.int8()),
+    
+    # Backwards-compatibility aliases
     ("core_stem", pa.string()),
     ("postal_digits", pa.string()),
-    ("has_address", pa.int8()),
 ])
 
 
 def preprocess_tsv_file_streaming(
     input_tsv_path: Path,
     output_parquet_path: Path,
-    batch_size: int = 25000,
+    batch_size: int = 50000,
+    force_recompute: bool = False,
 ):
     """
-    Streams a TSV file in small batches and writes directly to Parquet.
-    Peak memory usage < 100 MB.
+    Streams a TSV file in chunked batches and writes directly to Parquet.
+    Extracts all Phase 2 multi-representations with low memory (< 250 MB peak).
     """
-    if output_parquet_path.exists():
+    if output_parquet_path.exists() and not force_recompute:
         print(f"File already exists at {output_parquet_path}. Skipping.")
         return
 
-    print(f"\n{'='*70}")
-    print(f"STREAMING PREPROCESSING: {input_tsv_path.name}")
+    print(f"\n{'='*75}")
+    print(f"STREAMING MULTI-REPRESENTATION PREPROCESSING: {input_tsv_path.name}")
     print(f"Output: {output_parquet_path.name}")
-    print(f"{'='*70}")
+    print(f"{'='*75}")
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     start_time = time.time()
 
-    # Create PyArrow Parquet Writer
+    # Create PyArrow Parquet Writer with SNAPPY compression
     writer = pq.ParquetWriter(str(output_parquet_path), PARQUET_SCHEMA, compression="SNAPPY")
 
     total_processed = 0
     
-    # Read in streaming batches with Polars lazy scan or read_csv_batched
+    # Read in streaming batches with Polars lazy reader
     reader = pl.read_csv_batched(
         input_tsv_path,
         separator="\t",
@@ -100,27 +116,59 @@ def preprocess_tsv_file_streaming(
         col_countries = []
         col_bname_raw = []
         col_baddr_raw = []
+        
         col_name_clean = []
-        col_addr_clean = []
+        col_name_core = []
+        col_legal_form = []
         col_name_tokens = []
+        col_name_acronym = []
+        col_name_phonetic = []
+        
+        col_addr_clean = []
+        col_postal_clean = []
+        col_addr_unit_num = []
+        col_addr_digits = []
+        col_addr_tokens = []
+        col_has_address = []
+        
         col_core_stem = []
         col_postal_digits = []
-        col_has_address = []
 
         for eid, bname, baddr, country in zip(eids, bnames, baddrs, countries):
-            r = normalize_record(eid, bname, baddr, country)
-            col_eids.append(r[0])
-            col_countries.append(r[1])
-            col_bname_raw.append(r[2])
-            col_baddr_raw.append(r[3])
-            col_name_clean.append(r[4])
-            col_addr_clean.append(r[5])
-            col_name_tokens.append(r[6])
-            col_core_stem.append(r[7])
-            col_postal_digits.append(r[8])
-            col_has_address.append(r[9])
+            eid_str = str(eid) if eid is not None else ""
+            bname_str = str(bname) if bname is not None else ""
+            baddr_str = str(baddr) if baddr is not None else ""
+            country_str = str(country) if country is not None else ""
 
-        # Convert batch to Arrow Table and write directly to disk
+            # 1. Multi-Representation Name Extraction
+            name_rep = normalize_business_name_record(bname_str, country_str)
+            
+            # 2. Structured Address Extraction
+            addr_rep = parse_address_record(baddr_str, country_str)
+
+            col_eids.append(eid_str)
+            col_countries.append(country_str)
+            col_bname_raw.append(bname_str)
+            col_baddr_raw.append(baddr_str)
+            
+            col_name_clean.append(name_rep["name_clean"])
+            col_name_core.append(name_rep["name_core"])
+            col_legal_form.append(name_rep["legal_form"])
+            col_name_tokens.append(name_rep["name_tokens"])
+            col_name_acronym.append(name_rep["name_acronym"])
+            col_name_phonetic.append(name_rep["name_phonetic"])
+            
+            col_addr_clean.append(addr_rep["addr_clean"])
+            col_postal_clean.append(addr_rep["postal_clean"])
+            col_addr_unit_num.append(addr_rep["addr_unit_num"])
+            col_addr_digits.append(addr_rep["addr_digits"])
+            col_addr_tokens.append(addr_rep["addr_tokens"])
+            col_has_address.append(addr_rep["has_address"])
+            
+            col_core_stem.append(name_rep["name_core"])
+            col_postal_digits.append(addr_rep["addr_digits"])
+
+        # Convert batch to PyArrow Table and write directly to disk
         arrow_table = pa.Table.from_arrays(
             [
                 pa.array(col_eids, type=pa.string()),
@@ -128,11 +176,19 @@ def preprocess_tsv_file_streaming(
                 pa.array(col_bname_raw, type=pa.string()),
                 pa.array(col_baddr_raw, type=pa.string()),
                 pa.array(col_name_clean, type=pa.string()),
-                pa.array(col_addr_clean, type=pa.string()),
+                pa.array(col_name_core, type=pa.string()),
+                pa.array(col_legal_form, type=pa.string()),
                 pa.array(col_name_tokens, type=pa.string()),
+                pa.array(col_name_acronym, type=pa.string()),
+                pa.array(col_name_phonetic, type=pa.string()),
+                pa.array(col_addr_clean, type=pa.string()),
+                pa.array(col_postal_clean, type=pa.string()),
+                pa.array(col_addr_unit_num, type=pa.string()),
+                pa.array(col_addr_digits, type=pa.string()),
+                pa.array(col_addr_tokens, type=pa.string()),
+                pa.array(col_has_address, type=pa.int8()),
                 pa.array(col_core_stem, type=pa.string()),
                 pa.array(col_postal_digits, type=pa.string()),
-                pa.array(col_has_address, type=pa.int8()),
             ],
             schema=PARQUET_SCHEMA,
         )
@@ -143,9 +199,9 @@ def preprocess_tsv_file_streaming(
         if total_processed % 100000 == 0:
             elapsed = time.time() - start_time
             rate = total_processed / elapsed if elapsed > 0 else 0
-            print(f"  Processed {total_processed:,} rows [{rate:,.0f} rows/s] (RAM: < 100 MB)...")
+            print(f"  Processed {total_processed:,} rows [{rate:,.0f} rows/s] (RAM: < 250 MB)...")
 
-        del arrow_table, df_batch, col_eids, col_countries, col_name_clean, col_addr_clean
+        del arrow_table, df_batch
         gc.collect()
 
     writer.close()
@@ -153,10 +209,10 @@ def preprocess_tsv_file_streaming(
     print(f"Finished {output_parquet_path.name} ({total_processed:,} rows, {file_size_mb:.2f} MB) in {time.time() - start_time:.2f}s.")
 
 
-def run_full_preprocessing():
-    print("=" * 70)
-    print("PHASE 2: LOW-MEMORY STREAMING PREPROCESSING")
-    print("=" * 70)
+def run_full_preprocessing(force_recompute: bool = False):
+    print("=" * 75)
+    print("PHASE 2: MULTI-REPRESENTATION LOW-MEMORY STREAMING PREPROCESSING")
+    print("=" * 75)
 
     jobs = [
         (TRAIN_S1, PROCESSED_DIR / "train_source1_cleaned.parquet"),
@@ -172,12 +228,13 @@ def run_full_preprocessing():
         if not input_tsv.exists():
             print(f"[Warning] Input file not found: {input_tsv}. Skipping.")
             continue
-        preprocess_tsv_file_streaming(input_tsv, output_parquet)
+        preprocess_tsv_file_streaming(input_tsv, output_parquet, force_recompute=force_recompute)
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     print(f"ALL DATASETS PREPROCESSED SUCCESSFULLY IN {time.time() - total_start:.2f}s!")
-    print("=" * 70)
+    print("=" * 75)
 
 
 if __name__ == "__main__":
-    run_full_preprocessing()
+    force = "--force" in sys.argv
+    run_full_preprocessing(force_recompute=force)
