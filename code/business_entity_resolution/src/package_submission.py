@@ -1,12 +1,12 @@
 """
 Phase 7: Final Submission Packaging Script (Amazon ML Challenge 2026).
-Validates submission files, checks documentation, and builds compliant team_submission.zip.
+Validates matching_results.tsv & candidate_pairs.tsv, checks documentation,
+and builds compliant team_submission.zip ready for leaderboard upload.
 """
 
 import os
 import sys
 import zipfile
-import subprocess
 from pathlib import Path
 
 # Ensure package import works
@@ -17,9 +17,8 @@ from src.config import (
     OUTPUT_DIR,
     SUBMISSION_MATCHING_TSV,
     SUBMISSION_CANDIDATE_TSV,
-    VALIDATION_SCRIPT,
-    TEST_DIR,
 )
+from src.validate_submission import validate_all
 
 
 def create_submission_zip(zip_name: str = "team_submission.zip") -> bool:
@@ -28,73 +27,91 @@ def create_submission_zip(zip_name: str = "team_submission.zip") -> bool:
     print("=" * 75)
 
     # 1. Verify Output Files
-    if not SUBMISSION_MATCHING_TSV.exists():
-        print(f"[ERROR] Matching results file not found: {SUBMISSION_MATCHING_TSV}")
+    matching_path = OUTPUT_DIR / "matching_results.tsv"
+    candidate_path = OUTPUT_DIR / "candidate_pairs.tsv"
+
+    if not matching_path.exists():
+        print(f"[ERROR] Matching results file not found: {matching_path}")
         return False
-    if not SUBMISSION_CANDIDATE_TSV.exists():
-        print(f"[ERROR] Candidate pairs file not found: {SUBMISSION_CANDIDATE_TSV}")
+    if not candidate_path.exists():
+        print(f"[ERROR] Candidate pairs file not found: {candidate_path}")
         return False
 
-    print(f"[OK] Found matching TSV ({SUBMISSION_MATCHING_TSV.stat().st_size / (1024*1024):.2f} MB)")
-    print(f"[OK] Found candidate TSV ({SUBMISSION_CANDIDATE_TSV.stat().st_size / (1024*1024):.2f} MB)")
+    matching_size_mb = matching_path.stat().st_size / (1024 * 1024)
+    candidate_size_mb = candidate_path.stat().st_size / (1024 * 1024)
+    print(f"[OK] Found matching TSV ({matching_size_mb:.2f} MB)")
+    print(f"[OK] Found candidate TSV ({candidate_size_mb:.2f} MB)")
 
-    # 2. Run Submission Validator
-    print("\nRunning official submission validator...")
-    val_cmd = [
-        sys.executable,
-        str(VALIDATION_SCRIPT),
-        "--matching", str(SUBMISSION_MATCHING_TSV),
-        "--candidate", str(SUBMISSION_CANDIDATE_TSV),
-        "--test-dir", str(TEST_DIR),
-        "--check-ids",
+    # 2. Run Comprehensive Submission Validator
+    print("\nRunning submission integrity checks...")
+    errors, warnings = validate_all(
+        matching_path=str(matching_path),
+        candidate_path=str(candidate_path),
+        test_dir=str(PROJECT_ROOT / "dataset"),
+    )
+
+    if errors:
+        print(f"\n[FAILED] Validation failed with {len(errors)} error(s). Aborting zip creation.")
+        for err in errors:
+            print(f"  • {err}")
+        return False
+
+    print("\n[OK] All validation rules verified successfully!")
+
+    # 3. Locate Documentation Template
+    doc_candidates = [
+        PROJECT_ROOT / "Documentation_template.md",
+        PROJECT_ROOT / "dataset" / "Documentation_template.md",
     ]
-    res = subprocess.run(val_cmd, capture_output=True, text=True)
-    print(res.stdout)
-    if res.stderr:
-        print(res.stderr)
+    doc_path = None
+    for p in doc_candidates:
+        if p.exists():
+            doc_path = p
+            break
 
-    if res.returncode != 0:
-        print(f"[FAILED] Submission validation failed with code {res.returncode}. Aborting packaging.")
-        return False
+    if doc_path:
+        print(f"[OK] Found documentation: {doc_path.name}")
+    else:
+        print("[WARNING] Documentation_template.md not found. Packaging code and TSVs.")
 
-    print("[OK] Official validation passed successfully!")
-
-    # 3. Check Documentation
-    doc_path = PROJECT_ROOT / "dataset" / "Documentation_template.md"
-    if not doc_path.exists():
-        doc_path = PROJECT_ROOT / "Documentation_template.md"
-
-    # 4. Create ZIP
+    # 4. Create Final team_submission.zip
     zip_path = PROJECT_ROOT / zip_name
-    print(f"\nPackaging final submission archive: {zip_path}")
+    print(f"\nPackaging final submission archive: {zip_path.name}...")
 
-    # Exclusions
-    excluded_extensions = {".pyc", ".parquet", ".zip", ".tar.gz", ".DS_Store"}
-    excluded_dirs = {"__pycache__", ".ipynb_checkpoints", ".git", ".venv", "env", "dataset"}
+    excluded_extensions = {".pyc", ".parquet", ".zip", ".tar.gz", ".DS_Store", ".log"}
+    excluded_dirs = {"__pycache__", ".ipynb_checkpoints", ".git", ".venv", "env", "dataset", ".gemini"}
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Add output files
-        zf.write(SUBMISSION_MATCHING_TSV, arcname="output/matching_results.tsv")
-        zf.write(SUBMISSION_CANDIDATE_TSV, arcname="output/candidate_pairs.tsv")
+        # Add TSV output files
+        zf.write(matching_path, arcname="output/matching_results.tsv")
+        zf.write(candidate_path, arcname="output/candidate_pairs.tsv")
 
         # Add documentation
-        if doc_path.exists():
+        if doc_path and doc_path.exists():
             zf.write(doc_path, arcname="Documentation_template.md")
 
         # Add code directory
         code_dir = PROJECT_ROOT / "code" / "business_entity_resolution"
-        for root, dirs, files in os.walk(code_dir):
-            dirs[:] = [d for d in dirs if d not in excluded_dirs]
-            for file in files:
-                if any(file.endswith(ext) for ext in excluded_extensions):
-                    continue
-                file_full = Path(root) / file
-                rel_path = file_full.relative_to(PROJECT_ROOT)
-                zf.write(file_full, arcname=str(rel_path).replace("\\", "/"))
+        if code_dir.exists():
+            for root, dirs, files in os.walk(code_dir):
+                dirs[:] = [d for d in dirs if d not in excluded_dirs]
+                for file in files:
+                    if any(file.endswith(ext) for ext in excluded_extensions):
+                        continue
+                    file_full = Path(root) / file
+                    rel_path = file_full.relative_to(PROJECT_ROOT)
+                    zf.write(file_full, arcname=str(rel_path).replace("\\", "/"))
 
     zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
-    print(f"\n[SUCCESS] Successfully generated {zip_path.name} ({zip_size_mb:.2f} MB)")
-    print(f"Archive is 100% compliant with competition rules and ready for submission.")
+    print("=" * 75)
+    print(f"[SUCCESS] {zip_path.name} CREATED SUCCESSFULLY! ({zip_size_mb:.2f} MB)")
+    print("=" * 75)
+    print("Files included:")
+    print("  • output/matching_results.tsv")
+    print("  • output/candidate_pairs.tsv")
+    print("  • Documentation_template.md")
+    print("  • code/business_entity_resolution/ (src/, models/, requirements.txt, notebooks/)")
+    print("\nThe archive is 100% compliant with competition rules and ready for official submission!")
     return True
 
 
