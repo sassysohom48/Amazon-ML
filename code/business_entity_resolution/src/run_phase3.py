@@ -50,17 +50,22 @@ def run_phase3_pipeline(
         s2_path = PROCESSED_DIR / "train_source2_cleaned.parquet"
         s3_path = PROCESSED_DIR / "train_source3_cleaned.parquet"
 
+        cols_to_load = [
+            "entity_id", "country", "name_core", "name_tokens", "name_acronym",
+            "name_phonetic", "addr_clean", "addr_tokens", "addr_digits", "addr_unit_num", "postal_clean"
+        ]
+
         if folds_path.exists():
             print("Loading Fold 0 validation entities...")
             folds_df = pl.read_parquet(folds_path, columns=["entity_id", "fold_id"])
             val_eids = set(folds_df.filter(pl.col("fold_id") == 0)["entity_id"].to_list())
-            s1_val = pl.read_parquet(s1_path).filter(pl.col("entity_id").is_in(val_eids))
+            s1_val = pl.read_parquet(s1_path, columns=cols_to_load).filter(pl.col("entity_id").is_in(val_eids))
         else:
             print("Loading sample validation entities...")
-            s1_val = pl.read_parquet(s1_path).head(100000)
+            s1_val = pl.read_parquet(s1_path, columns=cols_to_load).head(100000)
 
-        s2_all = pl.read_parquet(s2_path)
-        s3_all = pl.read_parquet(s3_path)
+        s2_all = pl.read_parquet(s2_path, columns=cols_to_load)
+        s3_all = pl.read_parquet(s3_path, columns=cols_to_load)
 
         blocker = MultiChannelBlocker(max_candidates=max_k)
         blocker.fit(s2_all, s3_all)

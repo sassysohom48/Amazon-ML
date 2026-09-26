@@ -68,12 +68,15 @@ def evaluate_blocking_benchmark(
     for row in gt_df.iter_rows(named=True):
         gt_map[row["s1_id"]].add(row["tgt_id"])
 
-    # 2. Load Processed S1, S2, S3
-    print("\nLoading Enriched Cleaned Parquets...")
-    s1_all = pl.read_parquet(PROCESSED_DIR / "train_source1_cleaned.parquet")
-    s2_all = pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet")
-    s3_all = pl.read_parquet(PROCESSED_DIR / "train_source3_cleaned.parquet")
+    # 2. Load Processed S1, S2, S3 with exact required columns
+    cols_to_load = [
+        "entity_id", "country", "name_core", "name_tokens", "name_acronym",
+        "name_phonetic", "addr_clean", "addr_tokens", "addr_digits", "addr_unit_num", "postal_clean"
+    ]
 
+    print("\nLoading Enriched Cleaned Parquets (minimal columns)...")
+    s1_all = pl.read_parquet(PROCESSED_DIR / "train_source1_cleaned.parquet", columns=cols_to_load)
+    
     # Sample S1 validation entities that have ground truth
     s1_with_gt = s1_all.filter(pl.col("entity_id").is_in(list(gt_map.keys())))
     if sample_size and sample_size < len(s1_with_gt):
@@ -82,6 +85,13 @@ def evaluate_blocking_benchmark(
     else:
         s1_eval = s1_with_gt
         print(f"Evaluating across all {len(s1_eval):,} S1 entities with Ground Truth.")
+
+    del s1_all, s1_with_gt
+    import gc
+    gc.collect()
+
+    s2_all = pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet", columns=cols_to_load)
+    s3_all = pl.read_parquet(PROCESSED_DIR / "train_source3_cleaned.parquet", columns=cols_to_load)
 
     # 3. Fit MultiChannelBlocker on Target Pool
     blocker = MultiChannelBlocker(max_candidates=max(k_list))
