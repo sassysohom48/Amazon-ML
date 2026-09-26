@@ -69,18 +69,27 @@ flowchart TD
 | 2026-09-26 | Baseline | Trained baseline LightGBM GBDT (300 trees, $\theta^* = 0.65$, Val Macro $F_{0.5} = 0.6112$). Generated full test TSVs on SageMaker in 25 min. | `matching_results.tsv`, `candidate_pairs.tsv` |
 | 2026-09-26 | Submission 1 | Packaged `team_submission.zip` and submitted to Amazon portal. **Score: 0.753**. | `team_submission.zip` |
 | 2026-09-26 | Phase 1 (Completed) | Executed Phase 1 on SageMaker: 5-Fold stratified splits (`train_folds.parquet`), validation contract (`validation_contract.json`), ground truth signal profiler (`gt_signal_profile.json`), and French robustness test (`val_synthetic_france.parquet`). | `train_folds.parquet`, `validation_contract.json`, `gt_signal_profile.json`, `val_synthetic_france.parquet` |
-| 2026-09-26 | Phase 2 (Completed) | Designed & implemented non-destructive multi-representation normalizer (`name_clean`, `name_core`, `legal_form`, `name_acronym`, `name_phonetic`), structured address parser (`addr_clean`, `postal_clean`, `addr_unit_num`, `addr_digits`, `addr_tokens`), streaming preprocessor, and normalization ablation benchmark. | `src/multilingual_normalizer.py`, `src/address_parser.py`, `src/preprocess_datasets.py`, `src/ablation_normalization.py`, `src/run_phase2.py`, `02_phase2_multirepresentation_normalization.ipynb` |
+| 2026-09-26 | Phase 2 (Completed) | Designed & implemented non-destructive multi-representation normalizer (`name_clean`, `name_core`, `legal_form`, `name_acronym`, `name_phonetic`), structured address parser (`addr_clean`, `postal_clean`, `addr_unit_num`, `addr_digits`, `addr_tokens`), streaming preprocessor, and normalization ablation benchmark. | `train/test_source1/2/3_cleaned.parquet`, `phase2_normalization_ablation.json` |
 
 ---
 
 ## 🔍 Empirical Discoveries & Insights
 
-### Phase 1 Empirical Profiling (from SageMaker Run)
-* **US True Pairs:** Exact clean name match: `32.88%`, Name token overlap: `90.67%`, Address token overlap: `94.87%`, Char 3-gram overlap: `98.70%`.
-* **India True Pairs:** Exact clean name match: **only `19.35%`** (>80% have spelling/phonetic noise), Name token overlap: `71.02%`, Address token overlap: **`95.68%`** (Universal anchor!), Char 3-gram overlap: `78.00%`.
-* **Recall Ceiling:** `Exact_Name OR Name_Token OR Addr_Token` recovers **`100.00%`** of true match pairs in both countries.
-* **Phase 2 Implementation Philosophy:**
-  - *Non-Destructive Parallel Representations:* Preserves `name_clean`, `name_core`, `legal_form`, `name_acronym`, `name_phonetic`, and `name_tokens` in separate columns so the classifier has maximum discrimination without losing information.
-  - *Structured Address Decomposition:* Extracts unit/shop numbers, PIN codes, address digits, and street tokens separately.
-  - *Streaming Low-Memory Preprocessing:* Processes 24.2M records in streaming Arrow batches keeping peak RAM < 250 MB.
+### Phase 2 Normalization & Ablation Benchmarks (Empirical Proof)
+* **Combined Recall Ceiling:** **`99.84%`** (US), **`100.00%`** (India) across true match pairs!
+* **Legal Suffix Disentanglement Gain (`name_core`):**
+  - US exact name match increased from `31.16%` $\to$ **`46.65%`** (+15.49% absolute gain).
+  - India exact name match increased from `17.87%` $\to$ **`26.13%`** (+8.26% absolute gain).
+* **Phonetic & Acronym Coverage:**
+  - `name_phonetic` overlap: **`84.20%`** (US), **`56.80%`** (India).
+  - `name_acronym` overlap: **`44.59%`** (US), **`32.04%`** (India).
+* **Structured Address Anchors:**
+  - `addr_tokens_overlap`: **`94.70%`** (US), **`96.06%`** (India).
+  - `addr_digits_overlap`: **`74.35%`** (US), **`76.64%`** (India).
+  - `exact_addr_unit` (Shop/Flat/Suite): **`32.13%`** match in India (high precision anchor).
+* **Target Space Granularity & Collision Safety:**
+  - `name_clean`: 7,173,713 unique buckets (top-10 collision 0.14%).
+  - `name_core`: 6,054,430 unique buckets (top-10 collision 0.15%).
+  - `postal_clean`: 53,884 unique buckets (max bucket size 587).
+
 
