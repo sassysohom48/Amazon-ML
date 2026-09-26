@@ -70,6 +70,7 @@ flowchart TD
 | 2026-09-26 | Submission 1 | Packaged `team_submission.zip` and submitted to Amazon portal. **Score: 0.753**. | `team_submission.zip` |
 | 2026-09-26 | Phase 1 (Completed) | Executed Phase 1 on SageMaker: 5-Fold stratified splits (`train_folds.parquet`), validation contract (`validation_contract.json`), ground truth signal profiler (`gt_signal_profile.json`), and French robustness test (`val_synthetic_france.parquet`). | `train_folds.parquet`, `validation_contract.json`, `gt_signal_profile.json`, `val_synthetic_france.parquet` |
 | 2026-09-26 | Phase 2 (Completed) | Designed & implemented non-destructive multi-representation normalizer (`name_clean`, `name_core`, `legal_form`, `name_acronym`, `name_phonetic`), structured address parser (`addr_clean`, `postal_clean`, `addr_unit_num`, `addr_digits`, `addr_tokens`), streaming preprocessor, and normalization ablation benchmark. | `train/test_source1/2/3_cleaned.parquet`, `phase2_normalization_ablation.json` |
+| 2026-09-26 | Phase 3 (Implemented) | Implemented 8-channel independent retrieval blocker (`CountryMultiChannelIndex`) with country-aware IDF, Set UNION, 8-bit retrieval provenance tracking (`c_name_core`, `c_name_token`, `c_name_contain`, `c_acronym`, `c_addr_token`, `c_addr_numeric`, `c_postal`, `c_phonetic`), Recall@K curve evaluator, and Oracle $F_{0.5}$ ceiling diagnostic engine. | `src/country_idf.py`, `src/blocking_channels.py`, `src/blocking.py`, `src/ablation_blocking.py`, `src/run_phase3.py`, `03_phase3_candidate_blocking.ipynb` |
 
 ---
 
