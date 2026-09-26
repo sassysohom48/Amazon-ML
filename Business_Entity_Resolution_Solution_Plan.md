@@ -241,26 +241,35 @@ For every candidate pair $(S_1, S_{2/3})$, extracted 27 discriminative pairwise 
 
 ---
 
-### Phase 5 — Model Training, Hard Negative Mining & Macro $F_{0.5}$ Calibration `[COMPLETED ✅]`
+### Phase 5 — Hybrid Model Training & OOF Multi-Tier Calibration `[COMPLETED ✅]`
 
-1. **Training Sample Construction:**
-   * **Positives:** All true ground truth pairs $(S_1, S_2)$ and $(S_1, S_3)$.
-   * **Easy Negatives:** Random non-matching pairs from blocking candidates.
-   * **Hard Negatives:** High-similarity non-matches (same business name at different address, or different businesses at the same address).
-   * **Sampling Ratio:** $1 \text{ Positive} : 4 \text{ Negatives}$ ($350,000$ pairs total).
-2. **Model Training (LightGBM GBDT):**
-   * Built and trained 300-tree LightGBM binary classifier (`lgbm_entity_resolver.txt`, 2.08 MB) on 27 pairwise RapidFuzz/token features.
-   * Class weights and loss function optimized for high precision.
-3. **Macro $F_{0.5}$ Threshold Optimization & Singleton Defense:**
-   * Calibrated decision threshold on validation set: **$\theta^* = \mathbf{0.65}$**.
-   * **Validation Performance Achieved:**
-     * **Macro $F_{0.5}$ Score:** **`0.6112`**
-     * **Macro Precision:** **`71.01%`**
-     * **Macro Recall:** `46.84%`
-   * **Singleton Gatekeeper:** If an S1 entity has all candidate probabilities $< \theta^*$, outputs an empty match list `""` to secure a perfect $1.0$ score on singletons.
-   * **Synced Artifacts to S3:**
-     * `s3://amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon/shared/models/lgbm_entity_resolver.txt`
-     * `s3://amazon-sagemaker-720682844180-us-east-1-axi666gcrhqjon/shared/models/model_config.json`
+1. **Training Sample & Feature Matrix:**
+   * **Dataset Size:** $623,776$ pairs ($155,944$ Positives : $467,832$ Hard Negatives, exact $1:3$ ratio).
+   * **Feature Representation:** $73$ multi-scale features across all $8$ feature families.
+   * **Models Trained:** LightGBM ($600$ rounds, best $= 600$, train logloss $= 0.0182$, eval logloss $= 0.0277$) and CatBoost ($600$ iterations, test logloss $= 0.0316$).
+2. **Phase 5 Scientific Experiment Matrix & Results (Fold 0 Validation, $35\text{k}$ entities, $2.1\text{M}$ candidate pairs):**
+   * **Exp 5A (Single LightGBM Baseline, $\theta^* = 0.89$):** Macro $F_{0.5} = \mathbf{0.8843}$ (Precision: **`93.28%`**, Recall: **`79.61%`**, Singleton Acc: **`91.60%`**).
+   * **Exp 5B (Single CatBoost Baseline, $\theta^* = 0.88$):** Macro $F_{0.5} = \mathbf{0.8784}$ (Precision: **`93.04%`**, Recall: **`78.36%`**, Singleton Acc: **`91.65%`**).
+   * **Exp 5C (Ensemble Blend):** $w^* = 1.00$ (LightGBM 100%, CatBoost 0%).
+   * **Exp 5D (Country Calibration):** US $\theta^* = 0.91$ ($F_{0.5} = \mathbf{0.9185}$, Prec: **`96.31%`**, Rec: **`82.90%`**), India $\theta^* = 0.89$ ($F_{0.5} = \mathbf{0.8330}$, Prec: **`89.05%`**, Rec: **`73.91%`**). Overall $= \mathbf{0.8844}$.
+   * **Exp 5E (Country $\times$ Target Source Calibration):** S2 (Registry) $\theta^* = 0.88$, S3 (Web) $\theta^* = 0.91$. Overall $= \mathbf{0.8846}$ 🏆 **WINNER**.
+   * **Exp 5F (Post-Processing Gatekeeper):** Margin gap filter ($0.35$). Overall $= \mathbf{0.8844}$.
+
+---
+
+### Phase 5.5 — Controlled Empirical Fine-Tuning & Error Forensics `[ACTIVE FOCUS 🎯]`
+
+* **Full Plan Artifact:** [`Phase_5.5_Empirical_FineTuning_Plan.md`](file:///C:/Users/DELL/.gemini/antigravity-ide/brain/69cb8ef6-ed96-4fba-a64a-98f470a74b42/Phase_5.5_Empirical_FineTuning_Plan.md)
+* **Execution Priority:**
+  $$\text{Pillar 2 (Targeted Features)} \longrightarrow \text{Pillar 4 (Error Forensics \& Gating)} \longrightarrow \text{Pillar 1 (Data Scaling)} \longrightarrow \text{Pillar 3 (OOF Stacking)}$$
+* **Controlled 7-Run Protocol:**
+  - **Run A:** Reproduction baseline ($73$ feat, $50\text{k}$ ent, $F_{0.5} = \mathbf{0.8846}$).
+  - **Run B:** India phonetic & consonant skeleton (`name_consonant_skeleton_sim`, `acronym_initials_forward_match`).
+  - **Run C:** Structured locality sub-token decomposition & multi-tier exact anchors (`exact_core_name_and_postal`).
+  - **Run D:** `name_core_x_addr_jaccard` feature ablation & LightGBM HPO tuning.
+  - **Run E:** Controlled data scaling curve ($50\text{k} \longrightarrow 100\text{k} \longrightarrow 150\text{k}$ entities).
+  - **Run F:** Multi-class singleton error matrix & asymmetric contradiction gate.
+  - **Run G:** OOF confusion disagreement matrix & Meta-Model stacking.
 
 
 ---
