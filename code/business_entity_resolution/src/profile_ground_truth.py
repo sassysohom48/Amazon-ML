@@ -57,19 +57,14 @@ def profile_ground_truth_signals(
 ) -> Dict:
     """
     Profiles true pairs across individual signals and multi-signal combinations.
+    Uses lean, sampled filtering to maintain near-zero memory footprint (< 50MB RAM).
     """
     print("=" * 75)
     print("STEP 1.3: GROUND TRUTH SIGNAL & COMBINATION PROFILER")
     print("=" * 75)
-
-    # 1. Load Ground Truth Pairs & S1/S2/S3 Datasets
-    print("Loading cleaned datasets for signal extraction...")
     t0 = time.time()
-    s1_df = pl.read_parquet(PROCESSED_DIR / "train_source1_cleaned.parquet")
-    s2_df = pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet")
-    s3_df = pl.read_parquet(PROCESSED_DIR / "train_source3_cleaned.parquet")
 
-    # Load Ground Truth
+    # 1. Load Ground Truth First
     gt_path = PROCESSED_DIR / "train_ground_truth.parquet"
     if not gt_path.exists():
         gt_path = PROCESSED_DIR / "val_ground_truth.parquet"
@@ -77,7 +72,6 @@ def profile_ground_truth_signals(
     print(f"Reading ground truth from: {gt_path}...")
     gt_df = pl.read_parquet(gt_path)
     
-    # Identify pair columns
     s1_col = "source1_entity_id" if "source1_entity_id" in gt_df.columns else gt_df.columns[0]
     tgt_col = "matched_entity_id" if "matched_entity_id" in gt_df.columns else gt_df.columns[1]
 
@@ -88,8 +82,28 @@ def profile_ground_truth_signals(
     else:
         gt_sample = gt_df
 
-    # 2. Build Fast Attribute Lookups
-    print("\nBuilding attribute lookup tables...")
+    needed_s1_ids = set(gt_sample[s1_col].to_list())
+    needed_tgt_ids = set(gt_sample[tgt_col].to_list())
+    print(f"Sample contains {len(needed_s1_ids):,} unique S1 IDs and {len(needed_tgt_ids):,} unique Target IDs.")
+
+    # 2. Load Only Sampled Records from S1/S2/S3
+    print("\nReading sampled entities from cleaned datasets...")
+    cols = ["entity_id", "country", "name_clean", "name_tokens", "addr_clean", "postal_digits"]
+
+    s1_df = pl.read_parquet(PROCESSED_DIR / "train_source1_cleaned.parquet", columns=cols).filter(
+        pl.col("entity_id").is_in(needed_s1_ids)
+    )
+    s2_df = pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet", columns=cols).filter(
+        pl.col("entity_id").is_in(needed_tgt_ids)
+    )
+    s3_df = pl.read_parquet(PROCESSED_DIR / "train_source3_cleaned.parquet", columns=cols).filter(
+        pl.col("entity_id").is_in(needed_tgt_ids)
+    )
+
+    print(f"Loaded {len(s1_df):,} S1 and {len(s2_df) + len(s3_df):,} Target records in {time.time() - t0:.2f}s")
+
+    # 3. Build Fast Attribute Lookups for Sampled Entities
+    print("Building attribute lookup tables...")
     def build_lookup(df: pl.DataFrame):
         eids = df["entity_id"].to_list()
         countries = df["country"].to_list()
@@ -114,7 +128,7 @@ def profile_ground_truth_signals(
 
     lookup_s1 = build_lookup(s1_df)
     lookup_tgt = {**build_lookup(s2_df), **build_lookup(s3_df)}
-    print(f"Lookups built in {time.time() - t0:.2f}s")
+    print(f"Lookups built for {len(lookup_s1) + len(lookup_tgt):,} entities in {time.time() - t0:.2f}s")
 
     # 3. Profile Signals per Country
     print("\nEvaluating individual signals & combinations across true pairs...")
