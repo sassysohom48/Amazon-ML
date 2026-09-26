@@ -135,25 +135,30 @@ def evaluate_blocking_benchmark(
 
         for k in k_list:
             captured_true_pairs = 0
+            captured_entities = 0
             for eid in eids:
                 true_targets = gt_map[eid]
                 cand_targets = [c["target_id"] for c in candidate_dict.get(eid, [])[:k]]
                 captured = len(true_targets & set(cand_targets))
                 captured_true_pairs += captured
+                if captured > 0:
+                    captured_entities += 1
 
-            recall = (captured_true_pairs / total_eval_pairs) * 100.0
+            pair_recall = (captured_true_pairs / total_eval_pairs) * 100.0
+            entity_recall = (captured_entities / len(eids)) * 100.0
             
             # Oracle F0.5 calculation:
-            r_frac = recall / 100.0
+            r_frac = pair_recall / 100.0
             oracle_f05 = (1.25 * r_frac) / (0.25 + r_frac) if (0.25 + r_frac) > 0 else 0.0
 
             k_results[c_name]["by_k"][k] = {
                 "captured_pairs": captured_true_pairs,
-                "recall_pct": round(recall, 2),
+                "pair_recall_pct": round(pair_recall, 2),
+                "entity_recall_pct": round(entity_recall, 2),
                 "oracle_f05": round(oracle_f05, 4),
             }
 
-    # 6. Evaluate 8-Channel Attribution & Unique Recovery on ALL entities
+    # 6. Evaluate 9-Channel Attribution & Unique Recovery on ALL entities
     all_eval_eids = country_eval_entities["ALL"]
     for eid in all_eval_eids:
         true_targets = gt_map[eid]
@@ -190,23 +195,24 @@ def evaluate_blocking_benchmark(
                 })
 
     # 8. Print Results
-    print("\n" + "=" * 85)
+    print("\n" + "=" * 95)
     print("CANDIDATE RECALL & ORACLE F0.5 CEILING CURVE (Validation Sample):")
-    print("=" * 85)
-    print(f"{'K':<6} | {'US RECALL':<14} | {'INDIA RECALL':<14} | {'OVERALL RECALL':<16} | {'ORACLE F0.5'}")
-    print("-" * 85)
+    print("=" * 95)
+    print(f"{'K':<5} | {'US PAIR REC':<12} | {'IN PAIR REC':<12} | {'ALL PAIR REC':<13} | {'ENTITY RECALL':<14} | {'ORACLE F0.5'}")
+    print("-" * 95)
     
     us_by_k = k_results.get("US", {}).get("by_k", {})
     in_by_k = k_results.get("India", {}).get("by_k", {})
     all_by_k = k_results.get("ALL", {}).get("by_k", {})
 
     for k in k_list:
-        us_r = f"{us_by_k.get(k, {}).get('recall_pct', 0.0):.2f}%" if us_by_k else "N/A"
-        in_r = f"{in_by_k.get(k, {}).get('recall_pct', 0.0):.2f}%" if in_by_k else "N/A"
-        all_r = f"{all_by_k.get(k, {}).get('recall_pct', 0.0):.2f}%" if all_by_k else "N/A"
+        us_r = f"{us_by_k.get(k, {}).get('pair_recall_pct', 0.0):.2f}%" if us_by_k else "N/A"
+        in_r = f"{in_by_k.get(k, {}).get('pair_recall_pct', 0.0):.2f}%" if in_by_k else "N/A"
+        all_r = f"{all_by_k.get(k, {}).get('pair_recall_pct', 0.0):.2f}%" if all_by_k else "N/A"
+        ent_r = f"{all_by_k.get(k, {}).get('entity_recall_pct', 0.0):.2f}%" if all_by_k else "N/A"
         oracle = f"{all_by_k.get(k, {}).get('oracle_f05', 0.0):.4f}" if all_by_k else "N/A"
-        print(f"{k:<6} | {us_r:<14} | {in_r:<14} | {all_r:<16} | {oracle}")
-    print("=" * 85)
+        print(f"{k:<5} | {us_r:<12} | {in_r:<12} | {all_r:<13} | {ent_r:<14} | {oracle}")
+    print("=" * 95)
 
     print("\n8-CHANNEL RETRIEVAL ATTRIBUTION & UNIQUE RECOVERY MATRIX:")
     print("-" * 85)
