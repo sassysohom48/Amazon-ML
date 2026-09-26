@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import json
+import gc
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
@@ -24,7 +25,7 @@ from src.blocking import MultiChannelBlocker
 
 
 def evaluate_blocking_benchmark(
-    sample_size: int = 50000,
+    sample_size: int = 15000,
     k_list: List[int] = None,
     output_json_path: Path = None,
 ) -> Dict[str, any]:
@@ -59,14 +60,19 @@ def evaluate_blocking_benchmark(
     for c in gt_df.columns:
         if c in ("source1_entity_id", "source_entity_id", "s1_id"):
             s1_col = c
-        elif c in ("matched_entity_id", "target_entity_id", "s2_id", "s3_id", "target_id"):
+        elif c in ("matched_entity_ids", "matched_entity_id", "target_entity_id", "s2_id", "s3_id", "target_id"):
             tgt_col = c
     gt_df = gt_df.rename({s1_col: "s1_id", tgt_col: "tgt_id"})
 
-    # Map s1_id -> set of true matched targets
+    # Map s1_id -> set of true matched targets (Splitting comma-separated target IDs)
     gt_map = defaultdict(set)
     for row in gt_df.iter_rows(named=True):
-        gt_map[row["s1_id"]].add(row["tgt_id"])
+        s1 = str(row["s1_id"]).strip()
+        targets_raw = str(row["tgt_id"]).strip()
+        for tid in targets_raw.split(","):
+            tid_clean = tid.strip()
+            if tid_clean:
+                gt_map[s1].add(tid_clean)
 
     # 2. Load Processed S1, S2, S3 with exact required columns
     cols_to_load = [
@@ -87,7 +93,6 @@ def evaluate_blocking_benchmark(
         print(f"Evaluating across all {len(s1_eval):,} S1 entities with Ground Truth.")
 
     del s1_all, s1_with_gt
-    import gc
     gc.collect()
 
     s2_all = pl.read_parquet(PROCESSED_DIR / "train_source2_cleaned.parquet", columns=cols_to_load)
@@ -97,8 +102,11 @@ def evaluate_blocking_benchmark(
     blocker = MultiChannelBlocker(max_candidates=max(k_list))
     blocker.fit(s2_all, s3_all)
 
+    del s2_all, s3_all
+    gc.collect()
+
     # 4. Generate Candidate Pools with Provenance
-    print(f"\nQuerying candidates for evaluation sample (max K = {max(k_list)})...")
+    print(f"\nQuerying candidates for evaluation sample ({len(s1_eval):,} entities, max K = {max(k_list)})...")
     candidate_dict = blocker.block_dataframe(s1_eval, max_k=max(k_list))
 
     # 5. Evaluate Recall Curves & Oracle F0.5 across K
@@ -136,9 +144,6 @@ def evaluate_blocking_benchmark(
             recall = (captured_true_pairs / total_eval_pairs) * 100.0
             
             # Oracle F0.5 calculation:
-            # An oracle classifier predicts 1 for true targets in candidates and 0 for non-matches.
-            # Precision = 1.0 (since it never predicts false positives), Recall = recall
-            # F_0.5 = (1 + 0.5^2) * (P * R) / (0.5^2 * P + R) = 1.25 * R / (0.25 + R)
             r_frac = recall / 100.0
             oracle_f05 = (1.25 * r_frac) / (0.25 + r_frac) if (0.25 + r_frac) > 0 else 0.0
 
@@ -156,7 +161,6 @@ def evaluate_blocking_benchmark(
         for c in cands:
             tgt_id = c["target_id"]
             if tgt_id in true_targets:
-                # Identify which channels found this true match
                 channels_hit = []
                 if c["c_name_core"]: channels_hit.append("c_name_core")
                 if c["c_name_token"]: channels_hit.append("c_name_token")

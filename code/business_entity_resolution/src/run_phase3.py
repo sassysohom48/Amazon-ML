@@ -71,14 +71,15 @@ def run_phase3_pipeline(
         blocker.fit(s2_all, s3_all)
 
         print(f"\nGenerating candidate pool for {len(s1_val):,} validation entities (K = {max_k})...")
-        val_cand_dict = blocker.block_dataframe(s1_val, max_k=max_k)
-        
-        print("Converting candidate dictionary to Polars DataFrame with provenance...")
-        val_cand_df = blocker.convert_candidates_to_dataframe(val_cand_dict)
-        val_cand_df.write_parquet(val_output_path, compression="snappy")
-        
+        blocker.block_and_write_streaming_parquet(
+            s1_df=s1_val,
+            output_parquet_path=val_output_path,
+            max_k=max_k,
+            batch_size=25000,
+        )
+
         size_mb = val_output_path.stat().st_size / (1024 * 1024)
-        print(f"[OK] Generated {len(val_cand_df):,} validation candidate pairs ({size_mb:.2f} MB) at: {val_output_path}")
+        print(f"[OK] Generated validation candidate pairs ({size_mb:.2f} MB) at: {val_output_path}")
 
     total_elapsed = time.time() - t_start
     print("\n" + "=" * 85)
