@@ -16,6 +16,31 @@ from .config import (
 )
 from .normalizer import clean_text, extract_char_3grams, extract_soundex, RE_DIGITS
 
+# Canonical feature schema produced by this module
+FEATURE_COLS: List[str] = [
+    "candidate_rank",
+    "name_levenshtein",
+    "name_jaro_winkler",
+    "name_token_sort",
+    "name_token_set",
+    "name_partial_ratio",
+    "name_3gram_jaccard",
+    "name_len_diff",
+    "name_len_ratio",
+    "name_exact_match",
+    "name_soundex_match",
+    "has_s1_address",
+    "has_target_address",
+    "addr_both_present",
+    "addr_token_jaccard",
+    "addr_token_overlap",
+    "addr_numeric_match",
+    "addr_levenshtein",
+    "addr_token_sort",
+    "is_source2",
+    "is_source3",
+]
+
 
 def extract_digit_tokens(text: str) -> Set[str]:
     """Extracts standalone numeric tokens (door numbers, PINs, street numbers)."""
