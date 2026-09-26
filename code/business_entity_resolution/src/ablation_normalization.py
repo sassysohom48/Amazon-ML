@@ -15,7 +15,7 @@ import polars as pl
 # Ensure package import works
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import PROCESSED_DIR, DATA_DIR, TRAIN_DIR
+from src.config import PROCESSED_DIR, DATASET_DIR, TRAIN_DIR
 
 
 def evaluate_normalization_ablation(

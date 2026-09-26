@@ -9,6 +9,7 @@ from pathlib import Path
 # Base Directories
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # Amazon-ML/
 DATASET_DIR = PROJECT_ROOT / "dataset"
+DATA_DIR = DATASET_DIR
 RAW_DIR = DATASET_DIR / "raw"
 TRAIN_DIR = RAW_DIR / "train"
 TEST_DIR = RAW_DIR / "test"
