@@ -54,27 +54,74 @@ def clean_text(text: str) -> str:
 
 
 def extract_informative_tokens(text_clean: str, min_len: int = 2) -> List[str]:
-    """Extracts distinctive tokens for inverted index blocking."""
+    """
+    Extracts distinctive tokens for inverted index blocking.
+    Includes fallback if all tokens match corporate stopwords.
+    """
     if not text_clean:
         return []
     tokens = text_clean.split()
-    return [t for t in tokens if len(t) >= min_len and t not in CORP_STOPWORDS]
+    informative = [t for t in tokens if len(t) >= min_len and t not in CORP_STOPWORDS]
+    if not informative:
+        # Safety fallback for short names consisting solely of stopwords (e.g. 'Global Services', 'France Telecom')
+        informative = [t for t in tokens if len(t) >= min_len]
+    return informative
+
+
+def extract_sorted_token_keys(text_clean: str) -> List[str]:
+    """
+    Extracts canonical alphabetically sorted token keys.
+    Returns:
+    - Primary key: sorted combination of all significant tokens (up to 4)
+    - Secondary prefix key: sorted combination of first 2 significant tokens
+    Solves word-order inversion across noisy sources regardless of word position.
+    """
+    if not text_clean:
+        return []
+    tokens = [t for t in text_clean.split() if len(t) >= 2 and t not in CORP_STOPWORDS]
+    if not tokens:
+        tokens = [t for t in text_clean.split() if len(t) >= 2]
+    if not tokens:
+        return [text_clean[:12]] if text_clean else []
+
+    sorted_all = sorted(set(tokens))
+    keys = []
+
+    # Primary key: up to 4 distinctive sorted tokens
+    primary_key = "_".join(sorted_all[:4])
+    if primary_key:
+        keys.append(primary_key)
+
+    # Secondary prefix key: first 2 sorted tokens (if at least 2 tokens exist)
+    if len(sorted_all) >= 2:
+        prefix_key = "_".join(sorted_all[:2])
+        if prefix_key != primary_key:
+            keys.append(prefix_key)
+
+    return keys
 
 
 def extract_sorted_token_key(text_clean: str, max_tokens: int = 3) -> str:
+    """Backward-compatible single sorted key extractor."""
+    keys = extract_sorted_token_keys(text_clean)
+    return keys[0] if keys else ""
+
+
+def extract_char_3grams(text_clean: str) -> Set[str]:
     """
-    Extracts alphabetically sorted significant tokens (e.g. 'clinic_mumbai_producer').
-    Solves word-order inversion / transposition across sources.
+    Generates boundary-padded character 3-gram shingles for typo-tolerant fuzzy matching.
+    Boundary markers ('^' and '$') ensure prefix and suffix alignment.
     """
-    tokens = [t for t in text_clean.split() if len(t) >= 2 and t not in CORP_STOPWORDS]
-    if not tokens:
-        return text_clean[:10] if text_clean else ""
-    sorted_tokens = sorted(tokens[:max_tokens])
-    return "_".join(sorted_tokens)
+    if not text_clean:
+        return set()
+    compact = f"^{text_clean.replace(' ', '')}$"
+    if len(compact) < 3:
+        return {compact} if compact else set()
+    return {compact[i:i + 3] for i in range(len(compact) - 3 + 1)}
 
 
 def extract_char_4grams(text_clean: str) -> Set[str]:
-    """Generates character 4-gram shingles for typo-tolerant fuzzy matching."""
+    """Retained for backward compatibility: generates character 4-gram shingles."""
     if not text_clean:
         return set()
     compact = text_clean.replace(" ", "")
@@ -93,9 +140,9 @@ def extract_numeric_tokens(address_text: str) -> List[str]:
 def extract_address_anchors(addr_clean: str) -> List[str]:
     """
     Extracts multi-token address anchors:
+    - (postal_code / 5-6 digit numbers) e.g. 'pin_75008', 'pin_400080'
     - (street_number + locality_word) e.g. '1795_westchester', '797_lake'
-    - (postal_code / 5-6 digit numbers) e.g. '75008', '400080'
-    - (locality word pairs)
+    - (locality_word + street_number)
     """
     if not addr_clean:
         return []
@@ -109,7 +156,7 @@ def extract_address_anchors(addr_clean: str) -> List[str]:
 
     # 2. Extract digit + adjacent informative word anchors
     for i, tok in enumerate(tokens):
-        if tok.isdigit() and len(tok) >= 2:
+        if tok.isdigit() and len(tok) >= 1:
             # Pair with next non-stopword token
             if i + 1 < len(tokens):
                 next_t = tokens[i + 1]

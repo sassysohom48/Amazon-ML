@@ -250,6 +250,40 @@ def run_blocking_pipeline(evaluate_on_val: bool = True) -> None:
             val_cand_df = candidates_dict_to_dataframe(val_candidates)
             val_cand_out = CANDIDATES_DIR / "val_candidates.parquet"
             val_cand_df.write_parquet(val_cand_out, compression="snappy")
+            print(f"Saved validation candidate pairs to {val_cand_out.name}")
+
+    total_time = time.time() - start_total
+    print(f"\nStep 2 Candidate Blocking finished in {total_time:.2f} seconds.")
+
+
+if __name__ == "__main__":
+    run_blocking_pipeline()
+s2 = pl.read_parquet(PARQUET_DIR / f"train_source2_country={country}.parquet")
+                df_s3 = pl.read_parquet(PARQUET_DIR / f"train_source3_country={country}.parquet")
+
+                indexer = HighRecallCountryIndex(country=country, max_candidates=MAX_CANDIDATES_PER_S1)
+                indexer.fit_target_pool(df_s2, df_s3)
+                c_cands = indexer.generate_candidates_for_s1(c_s1)
+                val_candidates.update(c_cands)
+
+            # Load Ground Truth and Score Recall
+            from .dataset import load_ground_truth
+            gt_map = load_ground_truth(val_gt_path)
+
+            val_cand_sets = {k: set(v) for k, v in val_candidates.items()}
+            metrics = evaluate_blocking_recall(gt_map, val_cand_sets)
+            print("\n" + "=" * 55)
+            print("  VALIDATION CANDIDATE BLOCKING METRICS:")
+            print("=" * 55)
+            print(f"  • Candidate Recall:        {metrics['candidate_recall'] * 100:.2f}% (Recall Ceiling)")
+            print(f"  • True Pairs Captured:     {metrics['captured_true_pairs']:,} / {metrics['total_true_pairs']:,}")
+            print(f"  • Avg Candidates per S1:   {metrics['avg_candidates_per_s1']} (Max Cap: {MAX_CANDIDATES_PER_S1})")
+            print("=" * 55)
+
+            # Persist validation candidates to disk
+            val_cand_df = candidates_dict_to_dataframe(val_candidates)
+            val_cand_out = CANDIDATES_DIR / "val_candidates.parquet"
+            val_cand_df.write_parquet(val_cand_out, compression="snappy")
             print(f"✅ Saved validation candidate pairs to {val_cand_out.name}")
 
     total_time = time.time() - start_total
