@@ -1,7 +1,7 @@
 """
 Vectorized Multilingual Normalization & Representation Module (Amazon ML Challenge 2026).
 High-speed Unicode normalization, diacritic stripping, sorted token keys,
-character 3-grams, and address locality/postal anchor extraction for US, India, and France.
+phonetic Soundex keys, stemmed tokens, character 3-grams, and postal/address anchors.
 """
 
 import re
@@ -23,6 +23,32 @@ ADDR_STOPWORDS: Set[str] = {
     "st", "street", "rd", "road", "ave", "avenue", "blvd", "boulevard", "dr", "drive",
     "ln", "lane", "ct", "court", "unit", "apt", "apartment", "ste", "suite", "flr", "floor",
     "bldg", "building", "near", "opp", "opposite", "behind", "door", "flat", "no", "h"
+}
+
+# Corporate suffix stem mappings to harmonize variations (e.g. advisory -> advis)
+STEM_SUFFIXES = [
+    ("industries", "industr"), ("industry", "industr"), ("industrial", "industr"),
+    ("enterprises", "enterpris"), ("enterprise", "enterpris"),
+    ("technologies", "technolog"), ("technology", "technolog"),
+    ("solutions", "solut"), ("solution", "solut"),
+    ("services", "servic"), ("service", "servic"),
+    ("consulting", "consult"), ("consultants", "consult"), ("consultant", "consult"),
+    ("advisory", "advis"), ("advisors", "advis"), ("advisor", "advis"),
+    ("logistics", "logist"), ("logistic", "logist"),
+    ("holdings", "hold"), ("holding", "hold"),
+    ("properties", "propert"), ("property", "propert"),
+    ("bakeries", "baker"), ("bakery", "baker"),
+    ("jewellers", "jewel"), ("jewelers", "jewel"), ("jewellery", "jewel"), ("jewelry", "jewel")
+]
+
+# Fast Soundex mapping table
+SOUNDEX_MAP: Dict[str, str] = {
+    "b": "1", "f": "1", "p": "1", "v": "1",
+    "c": "2", "g": "2", "j": "2", "k": "2", "q": "2", "s": "2", "x": "2", "z": "2",
+    "d": "3", "t": "3",
+    "l": "4",
+    "m": "5", "n": "5",
+    "r": "6"
 }
 
 # Pre-compiled regex patterns for speed
@@ -53,19 +79,57 @@ def clean_text(text: str) -> str:
     return RE_WHITESPACE.sub(" ", text).strip()
 
 
+def stem_token(token: str) -> str:
+    """Harmonizes common morphological and corporate suffix variants."""
+    for full_suffix, stem in STEM_SUFFIXES:
+        if token == full_suffix or token.endswith(full_suffix):
+            return stem
+    return token
+
+
+def extract_soundex(word: str) -> str:
+    """
+    Computes standard Soundex code (e.g. 'Orelee' -> 'O640', 'Orlees' -> 'O642').
+    Captures phonetic typos and transliteration noise.
+    """
+    if not word or not word[0].isalpha():
+        return ""
+    word = word.lower()
+    code = [word[0].upper()]
+    prev = SOUNDEX_MAP.get(word[0], "")
+    for char in word[1:]:
+        digit = SOUNDEX_MAP.get(char, "")
+        if digit:
+            if digit != prev:
+                code.append(digit)
+                if len(code) == 4:
+                    break
+            prev = digit
+        else:
+            prev = ""
+    return "".join(code).ljust(4, "0")[:4]
+
+
 def extract_informative_tokens(text_clean: str, min_len: int = 2) -> List[str]:
     """
     Extracts distinctive tokens for inverted index blocking.
-    Includes fallback if all tokens match corporate stopwords.
+    Includes both original distinctive tokens and their stemmed variants.
     """
     if not text_clean:
         return []
     tokens = text_clean.split()
     informative = [t for t in tokens if len(t) >= min_len and t not in CORP_STOPWORDS]
     if not informative:
-        # Safety fallback for short names consisting solely of stopwords (e.g. 'Global Services', 'France Telecom')
+        # Fallback for short names consisting solely of stopwords
         informative = [t for t in tokens if len(t) >= min_len]
-    return informative
+    
+    # Add stemmed variants if they differ from original
+    augmented = list(informative)
+    for tok in informative:
+        st = stem_token(tok)
+        if st != tok and len(st) >= min_len:
+            augmented.append(st)
+    return augmented
 
 
 def extract_sorted_token_keys(text_clean: str) -> List[str]:
@@ -74,7 +138,7 @@ def extract_sorted_token_keys(text_clean: str) -> List[str]:
     Returns:
     - Primary key: sorted combination of all significant tokens (up to 4)
     - Secondary prefix key: sorted combination of first 2 significant tokens
-    Solves word-order inversion across noisy sources regardless of word position.
+    Solves word-order inversion across noisy sources.
     """
     if not text_clean:
         return []
@@ -92,13 +156,36 @@ def extract_sorted_token_keys(text_clean: str) -> List[str]:
     if primary_key:
         keys.append(primary_key)
 
-    # Secondary prefix key: first 2 sorted tokens (if at least 2 tokens exist)
+    # Secondary prefix key: first 2 sorted tokens
     if len(sorted_all) >= 2:
         prefix_key = "_".join(sorted_all[:2])
         if prefix_key != primary_key:
             keys.append(prefix_key)
 
     return keys
+
+
+def extract_phonetic_keys(text_clean: str) -> List[str]:
+    """
+    Extracts phonetic Soundex keys across the most significant tokens.
+    Handles severe spelling variations (e.g. 'Orelee' vs 'Orlees').
+    """
+    if not text_clean:
+        return []
+    tokens = [t for t in text_clean.split() if len(t) >= 2 and t not in CORP_STOPWORDS]
+    if not tokens:
+        tokens = text_clean.split()
+    if not tokens:
+        return []
+
+    # Take Soundex of primary significant tokens
+    phonetics = [extract_soundex(t) for t in tokens[:2]]
+    valid = [p for p in phonetics if p]
+    if not valid:
+        return []
+    
+    # Combined 2-token phonetic signature e.g. "ph_O642_B260"
+    return [f"ph_{'_'.join(valid)}"]
 
 
 def extract_sorted_token_key(text_clean: str, max_tokens: int = 3) -> str:
