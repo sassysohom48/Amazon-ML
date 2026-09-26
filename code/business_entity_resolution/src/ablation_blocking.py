@@ -76,7 +76,7 @@ def evaluate_blocking_benchmark(
 
     # 2. Load Processed S1, S2, S3 with exact required columns
     cols_to_load = [
-        "entity_id", "country", "name_core", "name_tokens", "name_acronym",
+        "entity_id", "country", "name_clean", "name_core", "name_tokens", "name_acronym",
         "name_phonetic", "addr_clean", "addr_tokens", "addr_digits", "addr_unit_num", "postal_clean"
     ]
 
@@ -162,14 +162,15 @@ def evaluate_blocking_benchmark(
             tgt_id = c["target_id"]
             if tgt_id in true_targets:
                 channels_hit = []
-                if c["c_name_core"]: channels_hit.append("c_name_core")
-                if c["c_name_token"]: channels_hit.append("c_name_token")
-                if c["c_name_contain"]: channels_hit.append("c_name_contain")
-                if c["c_acronym"]: channels_hit.append("c_acronym")
-                if c["c_addr_token"]: channels_hit.append("c_addr_token")
-                if c["c_addr_numeric"]: channels_hit.append("c_addr_numeric")
-                if c["c_postal"]: channels_hit.append("c_postal")
-                if c["c_phonetic"]: channels_hit.append("c_phonetic")
+                if c.get("c_name_core"): channels_hit.append("c_name_core")
+                if c.get("c_name_token"): channels_hit.append("c_name_token")
+                if c.get("c_name_contain"): channels_hit.append("c_name_contain")
+                if c.get("c_char_3gram"): channels_hit.append("c_char_3gram")
+                if c.get("c_acronym"): channels_hit.append("c_acronym")
+                if c.get("c_addr_token"): channels_hit.append("c_addr_token")
+                if c.get("c_addr_numeric"): channels_hit.append("c_addr_numeric")
+                if c.get("c_postal"): channels_hit.append("c_postal")
+                if c.get("c_phonetic"): channels_hit.append("c_phonetic")
 
                 for ch in channels_hit:
                     channel_attribution[ch]["total_hits"] += 1

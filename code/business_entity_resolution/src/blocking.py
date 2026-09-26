@@ -1,7 +1,7 @@
 """
-Step 3.3: High-Throughput Streaming Multi-Channel Blocker (Amazon ML Challenge 2026).
-Streams candidate generation directly to Parquet in small memory-safe batches (< 250 MB RAM),
-recording 8-bit retrieval provenance bitmasks and multi-signal ranking.
+Step 3.3: High-Recall Streaming Multi-Channel Blocker (Amazon ML Challenge 2026).
+Streams candidate generation directly to Parquet in memory-safe chunks (< 250 MB RAM),
+recording 9-channel retrieval provenance bitmasks and multi-signal ranking.
 """
 
 import time
@@ -25,6 +25,7 @@ CANDIDATE_SCHEMA = pa.schema([
     ("c_name_core", pa.int8()),
     ("c_name_token", pa.int8()),
     ("c_name_contain", pa.int8()),
+    ("c_char_3gram", pa.int8()),
     ("c_acronym", pa.int8()),
     ("c_addr_token", pa.int8()),
     ("c_addr_numeric", pa.int8()),
@@ -43,11 +44,9 @@ class MultiChannelBlocker:
     def __init__(
         self,
         max_candidates: int = 50,
-        max_posting_len: int = 350,
-        max_candidates_per_channel: int = 25,
+        max_candidates_per_channel: int = 40,
     ):
         self.max_candidates = max_candidates
-        self.max_posting_len = max_posting_len
         self.max_candidates_per_channel = max_candidates_per_channel
 
         self.idf_computer = CountryIDFComputer()
@@ -77,12 +76,11 @@ class MultiChannelBlocker:
         countries = target_df["country"].unique().to_list()
         for country in countries:
             c_name = str(country) if country is not None else "Unknown"
-            print(f"\nBuilding 8-Channel Index for country [{c_name}]...")
+            print(f"\nBuilding High-Recall Multi-Channel Index for country [{c_name}]...")
             c_target = target_df.filter(pl.col("country") == country)
             c_idx = CountryMultiChannelIndex(
                 country=c_name,
                 idf_computer=self.idf_computer,
-                max_posting_len=self.max_posting_len,
                 max_candidates_per_channel=self.max_candidates_per_channel,
             )
             c_idx.fit(c_target)
@@ -97,6 +95,7 @@ class MultiChannelBlocker:
     def query_entity_candidates(
         self,
         country: str,
+        name_clean: str,
         name_core: str,
         name_tokens: str,
         name_acronym: str,
@@ -114,6 +113,7 @@ class MultiChannelBlocker:
 
         c_idx = self.country_indexes[country]
         raw_candidates = c_idx.query_channels(
+            name_clean=name_clean,
             name_core=name_core,
             name_tokens_str=name_tokens,
             name_acronym=name_acronym,
@@ -138,9 +138,10 @@ class MultiChannelBlocker:
         for tgt_int_idx, info in ranked_candidates:
             tgt_eid = c_idx.target_ids[tgt_int_idx]
             mask = (
-                (info["c_name_core"] << 7) |
-                (info["c_name_token"] << 6) |
-                (info["c_name_contain"] << 5) |
+                (info["c_name_core"] << 8) |
+                (info["c_name_token"] << 7) |
+                (info["c_name_contain"] << 6) |
+                (info["c_char_3gram"] << 5) |
                 (info["c_acronym"] << 4) |
                 (info["c_addr_token"] << 3) |
                 (info["c_addr_numeric"] << 2) |
@@ -153,6 +154,7 @@ class MultiChannelBlocker:
                 "c_name_core": info["c_name_core"],
                 "c_name_token": info["c_name_token"],
                 "c_name_contain": info["c_name_contain"],
+                "c_char_3gram": info["c_char_3gram"],
                 "c_acronym": info["c_acronym"],
                 "c_addr_token": info["c_addr_token"],
                 "c_addr_numeric": info["c_addr_numeric"],
@@ -169,11 +171,12 @@ class MultiChannelBlocker:
         max_k: int = 50,
     ) -> Dict[str, List[Dict[str, any]]]:
         """
-        In-memory candidate blocking for benchmark evaluation (small/medium samples).
+        In-memory candidate blocking for benchmark evaluation.
         """
         results: Dict[str, List[Dict[str, any]]] = {}
         eids = s1_df["entity_id"].to_list()
         countries = s1_df["country"].to_list()
+        name_cleans = s1_df["name_clean"].to_list() if "name_clean" in s1_df.columns else s1_df["name_core"].to_list()
         name_cores = s1_df["name_core"].to_list()
         name_tokens = s1_df["name_tokens"].to_list()
         acronyms = s1_df["name_acronym"].to_list()
@@ -190,6 +193,7 @@ class MultiChannelBlocker:
             c_name = str(countries[i]) if countries[i] else "Unknown"
             cands = self.query_entity_candidates(
                 country=c_name,
+                name_clean=str(name_cleans[i]) if name_cleans[i] else "",
                 name_core=str(name_cores[i]) if name_cores[i] else "",
                 name_tokens=str(name_tokens[i]) if name_tokens[i] else "",
                 name_acronym=str(acronyms[i]) if acronyms[i] else "",
@@ -216,8 +220,7 @@ class MultiChannelBlocker:
         batch_size: int = 25000,
     ):
         """
-        Streams candidate generation and writes directly to Parquet in small chunks.
-        Keeps RAM strictly < 250 MB even on millions of entities!
+        Streams candidate generation directly to Parquet in small chunks (< 250 MB RAM).
         """
         print(f"\nStreaming Candidate Generation to: {output_parquet_path.name}")
         t_start = time.time()
@@ -229,6 +232,7 @@ class MultiChannelBlocker:
 
         eids = s1_df["entity_id"].to_list()
         countries = s1_df["country"].to_list()
+        name_cleans = s1_df["name_clean"].to_list() if "name_clean" in s1_df.columns else s1_df["name_core"].to_list()
         name_cores = s1_df["name_core"].to_list()
         name_tokens = s1_df["name_tokens"].to_list()
         acronyms = s1_df["name_acronym"].to_list()
@@ -249,6 +253,7 @@ class MultiChannelBlocker:
             col_c_name_core = []
             col_c_name_token = []
             col_c_name_contain = []
+            col_c_char_3gram = []
             col_c_acronym = []
             col_c_addr_token = []
             col_c_addr_numeric = []
@@ -262,6 +267,7 @@ class MultiChannelBlocker:
                 c_name = str(countries[i]) if countries[i] else "Unknown"
                 cands = self.query_entity_candidates(
                     country=c_name,
+                    name_clean=str(name_cleans[i]) if name_cleans[i] else "",
                     name_core=str(name_cores[i]) if name_cores[i] else "",
                     name_tokens=str(name_tokens[i]) if name_tokens[i] else "",
                     name_acronym=str(acronyms[i]) if acronyms[i] else "",
@@ -282,6 +288,7 @@ class MultiChannelBlocker:
                     col_c_name_core.append(c["c_name_core"])
                     col_c_name_token.append(c["c_name_token"])
                     col_c_name_contain.append(c["c_name_contain"])
+                    col_c_char_3gram.append(c["c_char_3gram"])
                     col_c_acronym.append(c["c_acronym"])
                     col_c_addr_token.append(c["c_addr_token"])
                     col_c_addr_numeric.append(c["c_addr_numeric"])
@@ -300,6 +307,7 @@ class MultiChannelBlocker:
                         pa.array(col_c_name_core, type=pa.int8()),
                         pa.array(col_c_name_token, type=pa.int8()),
                         pa.array(col_c_name_contain, type=pa.int8()),
+                        pa.array(col_c_char_3gram, type=pa.int8()),
                         pa.array(col_c_acronym, type=pa.int8()),
                         pa.array(col_c_addr_token, type=pa.int8()),
                         pa.array(col_c_addr_numeric, type=pa.int8()),

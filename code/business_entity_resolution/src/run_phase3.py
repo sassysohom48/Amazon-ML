@@ -51,7 +51,7 @@ def run_phase3_pipeline(
         s3_path = PROCESSED_DIR / "train_source3_cleaned.parquet"
 
         cols_to_load = [
-            "entity_id", "country", "name_core", "name_tokens", "name_acronym",
+            "entity_id", "country", "name_clean", "name_core", "name_tokens", "name_acronym",
             "name_phonetic", "addr_clean", "addr_tokens", "addr_digits", "addr_unit_num", "postal_clean"
         ]
 
