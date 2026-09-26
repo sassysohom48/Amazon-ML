@@ -75,7 +75,7 @@ class CountryInvertedIndexBlocker:
         for token, postings in raw_token_postings.items():
             p_len = len(postings)
             if p_len <= self.max_token_freq:
-                self.token_index[token] = postings
+                self.token_index[token] = postings[:400]
                 self.token_weights[token] = 12.0 / (p_len ** 0.35)
 
         # 3. Address Token Inverted Index (Distinctive words, len >= 3)
@@ -88,8 +88,8 @@ class CountryInvertedIndexBlocker:
 
         for at, postings in raw_addr_postings.items():
             p_len = len(postings)
-            if p_len <= 8000:
-                self.addr_token_index[at] = postings
+            if p_len <= 3000:
+                self.addr_token_index[at] = postings[:250]
                 self.addr_token_weights[at] = 8.0 / (p_len ** 0.35)
 
         # 4. Postal Code Index
@@ -100,8 +100,8 @@ class CountryInvertedIndexBlocker:
                         self.postal_index[p].append(idx)
 
         # Filter bigrams and postal postings
-        self.bigram_index = {k: v for k, v in self.bigram_index.items() if len(v) <= 10000}
-        self.postal_index = {k: v for k, v in self.postal_index.items() if len(v) <= 500}
+        self.bigram_index = {k: v[:250] for k, v in self.bigram_index.items() if len(v) <= 3000}
+        self.postal_index = {k: v[:200] for k, v in self.postal_index.items() if len(v) <= 500}
 
         elapsed = time.time() - start_time
         print(f"    Indexed {n_rows:,} target records in {elapsed:.2f}s "
@@ -126,7 +126,7 @@ class CountryInvertedIndexBlocker:
 
         # Signal 1: Exact Name Match (+100.0 priority)
         if name_clean in self.exact_name_index:
-            for idx in self.exact_name_index[name_clean]:
+            for idx in self.exact_name_index[name_clean][:100]:
                 candidate_scores[idx] += 100.0
 
         # Signal 2: Name Bigrams (+35.0 priority)
@@ -136,24 +136,24 @@ class CountryInvertedIndexBlocker:
                 for idx in self.bigram_index[bg]:
                     candidate_scores[idx] += 35.0
 
-        # Signal 3: Informative Name Tokens (IDF Weighted, top-4 rarest tokens)
+        # Signal 3: Informative Name Tokens (IDF Weighted, top-3 rarest tokens)
         if s1_tokens:
             sorted_tokens = sorted(
                 [t for t in s1_tokens if t in self.token_index],
                 key=lambda t: len(self.token_index[t])
             )
-            for token in sorted_tokens[:4]:
+            for token in sorted_tokens[:3]:
                 w = self.token_weights[token]
                 for idx in self.token_index[token]:
                     candidate_scores[idx] += w
 
-        # Signal 4: Distinctive Address Tokens (IDF Weighted, top-3 rarest tokens)
+        # Signal 4: Distinctive Address Tokens (IDF Weighted, top-2 rarest tokens)
         if s1_addr_tokens:
             sorted_addr_toks = sorted(
                 [at for at in s1_addr_tokens if at in self.addr_token_index],
                 key=lambda at: len(self.addr_token_index[at])
             )
-            for at in sorted_addr_toks[:3]:
+            for at in sorted_addr_toks[:2]:
                 w = self.addr_token_weights[at]
                 for idx in self.addr_token_index[at]:
                     candidate_scores[idx] += w
@@ -181,7 +181,7 @@ class MultiIndexBlocker:
     and executes high-recall candidate generation.
     """
 
-    def __init__(self, max_candidates: int = 35, max_token_freq: int = 35000):
+    def __init__(self, max_candidates: int = 35, max_token_freq: int = 4000):
         self.max_candidates = max_candidates
         self.max_token_freq = max_token_freq
         self.country_blockers: Dict[str, CountryInvertedIndexBlocker] = {}
@@ -231,7 +231,8 @@ class MultiIndexBlocker:
 
             blocker = self.country_blockers[country]
             country_s1 = s1_df.filter(pl.col("country") == country)
-            print(f"  Blocking {len(country_s1):,} entities for country [{country}]...")
+            total_country_s1 = len(country_s1)
+            print(f"  Blocking {total_country_s1:,} entities for country [{country}]...")
 
             eids = country_s1["entity_id"].to_list()
             names = country_s1["name_clean"].to_list()
@@ -240,12 +241,15 @@ class MultiIndexBlocker:
             postals = country_s1["postal_digits"].to_list()
 
             c_start = time.time()
-            for eid, name, tok, addr, post in zip(eids, names, tokens, addrs, postals):
+            for i, (eid, name, tok, addr, post) in enumerate(zip(eids, names, tokens, addrs, postals)):
                 candidates = blocker.query_entity(name, tok, addr, post)
                 results[eid] = candidates
+                if (i + 1) % 50000 == 0 or (i + 1) == total_country_s1:
+                    cur_speed = (i + 1) / (time.time() - c_start)
+                    print(f"    [{country}] Blocked {i + 1:,} / {total_country_s1:,} entities ({cur_speed:,.0f} ent/s)...")
 
             c_elapsed = time.time() - c_start
-            print(f"  Finished country [{country}] in {c_elapsed:.2f}s ({len(country_s1)/c_elapsed:,.0f} entities/s).")
+            print(f"  Finished country [{country}] in {c_elapsed:.2f}s ({total_country_s1/c_elapsed:,.0f} entities/s).")
 
         total_elapsed = time.time() - start_time
         print(f"Candidate blocking completed in {total_elapsed:.2f}s ({len(s1_df)/total_elapsed:,.0f} entities/s).")
