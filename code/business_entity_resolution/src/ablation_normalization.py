@@ -174,18 +174,18 @@ def evaluate_normalization_ablation(
     cols_to_check = ["name_clean", "name_core", "name_acronym", "name_phonetic", "postal_clean"]
 
     for col in cols_to_check:
-        col_series = targets_all[col].filter(pl.col(col) != "").filter(pl.col(col).is_not_null())
-        vc = col_series.value_counts().sort("count", descending=True)
+        col_df = targets_all.select(pl.col(col)).filter((pl.col(col) != "") & pl.col(col).is_not_null())
+        vc = col_df.group_by(col).len().sort("len", descending=True)
         unique_buckets = len(vc)
-        max_bucket = vc["count"][0] if len(vc) > 0 else 0
-        top10_sum = vc["count"][:10].sum() if len(vc) > 0 else 0
-        total_items = len(col_series)
+        max_bucket = int(vc["len"][0]) if len(vc) > 0 else 0
+        top10_sum = int(vc["len"][:10].sum()) if len(vc) > 0 else 0
+        total_items = len(col_df)
         top10_collision_pct = (top10_sum / total_items * 100.0) if total_items > 0 else 0.0
 
         collision_metrics[col] = {
             "total_items": total_items,
             "unique_buckets": unique_buckets,
-            "max_bucket_size": int(max_bucket),
+            "max_bucket_size": max_bucket,
             "top10_collision_pct": round(float(top10_collision_pct), 2),
         }
 
