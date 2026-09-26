@@ -46,6 +46,7 @@ Thumbs.db
 .idea/
 
 # Large Temporary & Model Outputs
-output/
+output/*
+!output/matching_results.tsv
 *.log
 *.tmp
