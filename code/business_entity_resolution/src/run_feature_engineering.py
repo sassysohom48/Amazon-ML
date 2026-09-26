@@ -118,13 +118,7 @@ def run_phase_4_feature_engineering(
     target_combined = pl.concat([s2_all, s3_all])
     idf_comp.fit_from_dataframe(target_combined)
     extractor = FeatureExtractor(idf_computer=idf_comp)
-
-    # Convert S1, S2, S3 to fast dictionary lookups
-    print("Building memory-efficient in-memory record lookup dictionaries...")
-    s2_records = {row["entity_id"]: row for row in s2_all.iter_rows(named=True)}
-    s3_records = {row["entity_id"]: row for row in s3_all.iter_rows(named=True)}
-    tgt_records = {**s2_records, **s3_records}
-    del s2_records, s3_records, target_combined
+    del target_combined
     gc.collect()
 
     # 4. Strict Stratified Fold Isolation
@@ -153,10 +147,27 @@ def run_phase_4_feature_engineering(
     print(f"Generating training candidate pairs for {len(s1_train_sample):,} entities (K = 50)...")
     blocker = MultiChannelBlocker(max_candidates=50)
     blocker.fit(s2_all, s3_all)
+
+    train_cands_dict = blocker.block_dataframe(s1_train_sample, max_k=50)
+
+    # Fast Lazy Target Record Lookup (Only for needed candidate targets ~250k rows instead of 10.3M)
+    print("\nBuilding targeted in-memory dictionary for candidate targets...")
+    needed_tgt_ids = set()
+    for cand_list in train_cands_dict.values():
+        for c in cand_list:
+            needed_tgt_ids.add(c["target_id"])
+
+    s2_filtered = s2_all.filter(pl.col("entity_id").is_in(needed_tgt_ids))
+    s3_filtered = s3_all.filter(pl.col("entity_id").is_in(needed_tgt_ids))
     del s2_all, s3_all
     gc.collect()
 
-    train_cands_dict = blocker.block_dataframe(s1_train_sample, max_k=50)
+    s2_records = {row["entity_id"]: row for row in s2_filtered.iter_rows(named=True)}
+    s3_records = {row["entity_id"]: row for row in s3_filtered.iter_rows(named=True)}
+    tgt_records = {**s2_records, **s3_records}
+    del s2_records, s3_records, s2_filtered, s3_filtered
+    gc.collect()
+    print(f"Cached {len(tgt_records):,} candidate target records in memory (< 150 MB RAM).")
 
     # 6. Mine Balanced Pairs: Positives + Categorical Hard Negatives
     print("\nMining Category-Balanced Training Pairs (Positives + Hard Negatives)...")
