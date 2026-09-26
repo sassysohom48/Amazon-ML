@@ -491,44 +491,77 @@ class MultiTierCalibrator:
                 country_source_thresholds[country] = {"S2": 0.55, "S3": 0.60}
                 continue
 
+            # Fast 2-Stage Coordinate Descent: Optimize S2 then S3 (100x speedup)
+            best_th_s2 = 0.89
+            best_th_s3 = 0.91
             best_c_f05 = -1.0
-            best_pair = (0.88, 0.91)
 
-            # High-resolution coordinate descent / grid search
+            # Step 1: Sweep S2 with initial S3
             for th_s2 in thresholds:
-                for th_s3 in thresholds:
-                    f05_sum = 0.0
-                    for s1_id in c_s1:
-                        n_true = true_counts[s1_id]
-                        c_list = entity_cands.get(s1_id, [])
+                f05_sum = 0.0
+                for s1_id in c_s1:
+                    n_true = true_counts[s1_id]
+                    c_list = entity_cands.get(s1_id, [])
 
-                        tp = 0
-                        n_pred = 0
-                        for is_true, p, is_s2 in c_list:
-                            req_th = th_s2 if is_s2 else th_s3
-                            if p >= req_th:
-                                n_pred += 1
-                                if is_true:
-                                    tp += 1
+                    tp = 0
+                    n_pred = 0
+                    for is_true, p, is_s2 in c_list:
+                        req_th = th_s2 if is_s2 else best_th_s3
+                        if p >= req_th:
+                            n_pred += 1
+                            if is_true:
+                                tp += 1
 
-                        if n_true == 0:
-                            if n_pred == 0:
-                                f05_sum += 1.0
-                        else:
-                            if n_pred > 0 and tp > 0:
-                                p_val = tp / n_pred
-                                r_val = tp / n_true
-                                denom = (beta_sq * p_val) + r_val
-                                f05_sum += (weight_factor * p_val * r_val) / denom if denom > 0 else 0.0
+                    if n_true == 0:
+                        if n_pred == 0:
+                            f05_sum += 1.0
+                    else:
+                        if n_pred > 0 and tp > 0:
+                            p_val = tp / n_pred
+                            r_val = tp / n_true
+                            denom = (beta_sq * p_val) + r_val
+                            f05_sum += (weight_factor * p_val * r_val) / denom if denom > 0 else 0.0
 
-                    m_f05 = f05_sum / len(c_s1) if c_s1 else 0.0
-                    if m_f05 > best_c_f05:
-                        best_c_f05 = m_f05
-                        best_pair = (float(th_s2), float(th_s3))
+                m_f05 = f05_sum / len(c_s1) if c_s1 else 0.0
+                if m_f05 > best_c_f05:
+                    best_c_f05 = m_f05
+                    best_th_s2 = float(th_s2)
+
+            # Step 2: Sweep S3 with optimal S2 fixed
+            best_c_f05 = -1.0
+            for th_s3 in thresholds:
+                f05_sum = 0.0
+                for s1_id in c_s1:
+                    n_true = true_counts[s1_id]
+                    c_list = entity_cands.get(s1_id, [])
+
+                    tp = 0
+                    n_pred = 0
+                    for is_true, p, is_s2 in c_list:
+                        req_th = best_th_s2 if is_s2 else th_s3
+                        if p >= req_th:
+                            n_pred += 1
+                            if is_true:
+                                tp += 1
+
+                    if n_true == 0:
+                        if n_pred == 0:
+                            f05_sum += 1.0
+                    else:
+                        if n_pred > 0 and tp > 0:
+                            p_val = tp / n_pred
+                            r_val = tp / n_true
+                            denom = (beta_sq * p_val) + r_val
+                            f05_sum += (weight_factor * p_val * r_val) / denom if denom > 0 else 0.0
+
+                m_f05 = f05_sum / len(c_s1) if c_s1 else 0.0
+                if m_f05 > best_c_f05:
+                    best_c_f05 = m_f05
+                    best_th_s3 = float(th_s3)
 
             country_source_thresholds[country] = {
-                "S2": best_pair[0],
-                "S3": best_pair[1],
+                "S2": best_th_s2,
+                "S3": best_th_s3,
             }
 
         # Combined evaluation
