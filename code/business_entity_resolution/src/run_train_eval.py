@@ -32,6 +32,7 @@ from src.train_model import (
     train_lightgbm_model,
     train_catboost_model,
     MultiTierCalibrator,
+    compute_oof_disagreement_matrix,
     save_phase5_artifacts,
     HAS_CATBOOST,
 )
@@ -218,8 +219,8 @@ def prepare_validation_candidate_features(
     del s1_val_df, s2_val_df, s3_val_df, s2_records, s3_records
     gc.collect()
 
-    # 4. Extract 73 Features for Validation Pairs
-    print(f"Extracting 73 features for {len(flat_s1):,} validation candidate pairs...")
+    # 4. Extract Pairwise Features for Validation Pairs
+    print(f"Extracting {len(extractor.feature_names)} features for {len(flat_s1):,} validation candidate pairs...")
     t_feat = time.time()
     val_features = []
     val_countries = []
@@ -280,6 +281,12 @@ def run_phase_5_pipeline(max_val_entities: int = 35000):
         iterations=600,
         early_stopping_rounds=50,
     )
+
+    # Save trained model checkpoints immediately to disk
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    lgb_model.save_model(str(MODELS_DIR / "lgbm_entity_resolver.txt"))
+    if cb_model is not None:
+        cb_model.save_model(str(MODELS_DIR / "catboost_entity_resolver.cbm"))
 
     del X_tr, y_tr, X_va, y_va
     gc.collect()
