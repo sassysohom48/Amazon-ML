@@ -46,13 +46,14 @@ def evaluate_normalization_ablation(
         gt_df = pl.read_csv(gt_path, separator="\t")
 
     # Standardize column names
-    col_mapping = {}
+    s1_col = gt_df.columns[0]
+    tgt_col = gt_df.columns[1]
     for c in gt_df.columns:
         if c in ("source1_entity_id", "source_entity_id", "s1_id"):
-            col_mapping[c] = "s1_id"
-        elif c in ("target_entity_id", "s2_id", "s3_id", "target_id"):
-            col_mapping[c] = "tgt_id"
-    gt_df = gt_df.rename(col_mapping)
+            s1_col = c
+        elif c in ("matched_entity_id", "target_entity_id", "s2_id", "s3_id", "target_id"):
+            tgt_col = c
+    gt_df = gt_df.rename({s1_col: "s1_id", tgt_col: "tgt_id"})
 
     n_total_gt = len(gt_df)
     if sample_size and sample_size < n_total_gt:
