@@ -28,10 +28,12 @@ class DiagnosticEvaluator:
 
     def __init__(self, ground_truth_path: Optional[Path] = None):
         if ground_truth_path is None:
-            if (PROCESSED_DIR / "val_ground_truth.parquet").exists():
-                ground_truth_path = PROCESSED_DIR / "val_ground_truth.parquet"
-            else:
+            if (PROCESSED_DIR / "train_ground_truth.parquet").exists():
                 ground_truth_path = PROCESSED_DIR / "train_ground_truth.parquet"
+            elif (TRAIN_DIR / "train_ground_truth.tsv").exists():
+                ground_truth_path = TRAIN_DIR / "train_ground_truth.tsv"
+            else:
+                ground_truth_path = PROCESSED_DIR / "val_ground_truth.parquet"
 
         self.gt_path = ground_truth_path
         self.ground_truth: Dict[str, Set[str]] = {}

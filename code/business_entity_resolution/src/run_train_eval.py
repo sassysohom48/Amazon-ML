@@ -95,11 +95,11 @@ def prepare_validation_candidate_features(
     t0 = time.time()
 
     val_cand_path = PROCESSED_DIR / "val_candidate_pairs.parquet"
-    val_gt_path = PROCESSED_DIR / "val_ground_truth.parquet"
+    val_gt_path = PROCESSED_DIR / "train_ground_truth.parquet"
     if not val_gt_path.exists():
-        val_gt_path = PROCESSED_DIR / "train_ground_truth.parquet"
+        val_gt_path = TRAIN_DIR / "train_ground_truth.tsv"
         if not val_gt_path.exists():
-            val_gt_path = TRAIN_DIR / "train_ground_truth.tsv"
+            val_gt_path = PROCESSED_DIR / "val_ground_truth.parquet"
 
     # 1. Load Ground Truth
     print(f"Loading validation ground truth from {val_gt_path.name}...")
