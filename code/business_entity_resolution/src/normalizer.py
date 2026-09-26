@@ -1,7 +1,7 @@
 """
 Vectorized Multilingual Normalization & Representation Module (Amazon ML Challenge 2026).
 High-speed Unicode normalization, diacritic stripping, sorted token keys,
-and address locality anchor extraction for US, India, and France.
+character 3-grams, and address locality/postal anchor extraction for US, India, and France.
 """
 
 import re
@@ -137,10 +137,17 @@ def extract_numeric_tokens(address_text: str) -> List[str]:
     return RE_DIGITS.findall(address_text.lower())
 
 
+def extract_postal_codes(addr_clean: str) -> List[str]:
+    """Extracts standalone 5-6 digit postal codes (ZIP / PIN / Code Postal)."""
+    if not addr_clean:
+        return []
+    tokens = addr_clean.split()
+    return [f"pin_{tok}" for tok in tokens if tok.isdigit() and len(tok) in (5, 6)]
+
+
 def extract_address_anchors(addr_clean: str) -> List[str]:
     """
     Extracts multi-token address anchors:
-    - (postal_code / 5-6 digit numbers) e.g. 'pin_75008', 'pin_400080'
     - (street_number + locality_word) e.g. '1795_westchester', '797_lake'
     - (locality_word + street_number)
     """
@@ -149,12 +156,7 @@ def extract_address_anchors(addr_clean: str) -> List[str]:
     tokens = addr_clean.split()
     anchors = []
 
-    # 1. Extract standalone 5-6 digit postal codes (high precision)
-    for tok in tokens:
-        if tok.isdigit() and len(tok) in (5, 6):
-            anchors.append(f"pin_{tok}")
-
-    # 2. Extract digit + adjacent informative word anchors
+    # Extract digit + adjacent informative word anchors
     for i, tok in enumerate(tokens):
         if tok.isdigit() and len(tok) >= 1:
             # Pair with next non-stopword token

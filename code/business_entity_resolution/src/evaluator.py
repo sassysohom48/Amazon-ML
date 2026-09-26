@@ -4,7 +4,7 @@ Computes exact Macro F_0.5 Score (beta=0.5), Precision, Recall, Candidate Recall
 and singleton breakdown.
 """
 
-from typing import Dict, Set, Tuple
+from typing import Dict, Set, Tuple, List, Optional
 import numpy as np
 
 
@@ -137,3 +137,84 @@ def evaluate_blocking_recall(
         "avg_candidates_per_s1": round(avg_candidates, 2),
         "total_candidates": total_candidates,
     }
+
+
+def evaluate_blocking_benchmark(
+    ground_truth: Dict[str, Set[str]],
+    ranked_candidates: Dict[str, List[str]],
+    k_list: List[int] = [5, 10, 15, 20, 25, 35, 50, 75, 100],
+    country_map: Optional[Dict[str, str]] = None
+) -> List[Dict[str, float]]:
+    """
+    Computes candidate recall and Oracle F0.5 ceiling curves across various K thresholds.
+    Oracle F0.5 represents the theoretical upper bound of the entire ER pipeline:
+    the score achieved if the downstream classifier makes perfect predictions on the candidate set.
+    """
+    results = []
+    non_singletons = {k: v for k, v in ground_truth.items() if len(v) > 0}
+    total_non_singleton_entities = len(non_singletons)
+    total_true_pairs = sum(len(v) for v in non_singletons.values())
+    total_all_entities = len(ground_truth)
+
+    for k in k_list:
+        captured_pairs = 0
+        entities_hit = 0
+        oracle_f_scores = []
+
+        # Breakdown by country if map provided
+        us_true_pairs = 0
+        us_captured_pairs = 0
+        in_true_pairs = 0
+        in_captured_pairs = 0
+
+        for s1_id, true_set in ground_truth.items():
+            cands = ranked_candidates.get(s1_id, [])[:k]
+            cand_set = set(cands)
+            c_country = country_map.get(s1_id, "").upper() if country_map else ""
+
+            if len(true_set) == 0:
+                # Singleton: Perfect oracle predicts empty -> F0.5 = 1.0
+                oracle_f_scores.append(1.0)
+                continue
+
+            # Non-singleton tracking
+            hits = len(true_set & cand_set)
+            captured_pairs += hits
+            if hits > 0:
+                entities_hit += 1
+
+            # Country tracking
+            if c_country == "US":
+                us_true_pairs += len(true_set)
+                us_captured_pairs += hits
+            elif c_country == "INDIA":
+                in_true_pairs += len(true_set)
+                in_captured_pairs += hits
+
+            # Oracle score on candidate set
+            if hits == 0:
+                oracle_f_scores.append(0.0)
+            else:
+                p = 1.0  # Oracle selects only true positives from candidates
+                r = hits / len(true_set)
+                oracle_f = compute_f_beta(p, r, beta=0.5)
+                oracle_f_scores.append(oracle_f)
+
+        pair_recall = (captured_pairs / total_true_pairs) if total_true_pairs > 0 else 1.0
+        entity_recall = (entities_hit / total_non_singleton_entities) if total_non_singleton_entities > 0 else 1.0
+        oracle_f05 = float(np.mean(oracle_f_scores)) if oracle_f_scores else 0.0
+
+        us_rec = (us_captured_pairs / us_true_pairs) if us_true_pairs > 0 else 0.0
+        in_rec = (in_captured_pairs / in_true_pairs) if in_true_pairs > 0 else 0.0
+
+        results.append({
+            "k": k,
+            "us_pair_recall": round(us_rec, 4),
+            "in_pair_recall": round(in_rec, 4),
+            "all_pair_recall": round(pair_recall, 4),
+            "entity_recall": round(entity_recall, 4),
+            "oracle_f05": round(oracle_f05, 4),
+        })
+
+    return results
+
