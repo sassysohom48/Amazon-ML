@@ -38,7 +38,7 @@ class CountryIDFComputer:
             max_allowed_df = int(n_docs * self.max_df_fraction)
 
             # 1. Name Tokens IDF
-            name_tokens_series = c_df["name_tokens"].filter(pl.col("name_tokens") != "").filter(pl.col("name_tokens").is_not_null())
+            name_tokens_series = c_df.filter((pl.col("name_tokens") != "") & pl.col("name_tokens").is_not_null())["name_tokens"]
             name_counts = defaultdict(int)
             for tok_str in name_tokens_series:
                 for t in set(tok_str.split()):
@@ -51,7 +51,7 @@ class CountryIDFComputer:
                     self.name_idf[c_name][t] = idf
 
             # 2. Address Tokens IDF
-            addr_tokens_series = c_df["addr_tokens"].filter(pl.col("addr_tokens") != "").filter(pl.col("addr_tokens").is_not_null())
+            addr_tokens_series = c_df.filter((pl.col("addr_tokens") != "") & pl.col("addr_tokens").is_not_null())["addr_tokens"]
             addr_counts = defaultdict(int)
             for atok_str in addr_tokens_series:
                 for at in set(atok_str.split()):
