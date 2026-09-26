@@ -71,6 +71,7 @@ flowchart TD
 | 2026-09-26 | Phase 1 (Completed) | Executed Phase 1 on SageMaker: 5-Fold stratified splits (`train_folds.parquet`), validation contract (`validation_contract.json`), ground truth signal profiler (`gt_signal_profile.json`), and French robustness test (`val_synthetic_france.parquet`). | `train_folds.parquet`, `validation_contract.json`, `gt_signal_profile.json`, `val_synthetic_france.parquet` |
 | 2026-09-26 | Phase 2 (Completed) | Designed & implemented non-destructive multi-representation normalizer (`name_clean`, `name_core`, `legal_form`, `name_acronym`, `name_phonetic`), structured address parser (`addr_clean`, `postal_clean`, `addr_unit_num`, `addr_digits`, `addr_tokens`), streaming preprocessor, and normalization ablation benchmark. | `train/test_source1/2/3_cleaned.parquet`, `phase2_normalization_ablation.json` |
 | 2026-09-26 | Phase 3 (Implemented) | Implemented 8-channel independent retrieval blocker (`CountryMultiChannelIndex`) with country-aware IDF, Set UNION, 8-bit retrieval provenance tracking (`c_name_core`, `c_name_token`, `c_name_contain`, `c_acronym`, `c_addr_token`, `c_addr_numeric`, `c_postal`, `c_phonetic`), Recall@K curve evaluator, and Oracle $F_{0.5}$ ceiling diagnostic engine. | `src/country_idf.py`, `src/blocking_channels.py`, `src/blocking.py`, `src/ablation_blocking.py`, `src/run_phase3.py`, `03_phase3_candidate_blocking.ipynb` |
+| 2026-09-26 | Phase 3 (Forensic Optimization) | Diagnosed 15 ground truth miss patterns: (1) Empty target field asymmetry (empty name or empty address in S2/S3), (2) Concatenated domain names (`.com`, `.org`), (3) Arbitrary posting list truncation. Upgraded with: (1) Domain suffix stripping & concatenated brand indexing, (2) IDF-aware dynamic posting list traversal, (3) Multi-modal tiered candidate selection (60% composite, 20% guaranteed address-only, 20% guaranteed name-only). | `src/blocking_channels.py`, `src/blocking.py`, `src/diagnose_blocking_misses.py`, `src/run_phase3.py` |
 
 ---
 
@@ -80,7 +81,7 @@ flowchart TD
 * **Combined Recall Ceiling:** **`99.84%`** (US), **`100.00%`** (India) across true match pairs!
 * **Legal Suffix Disentanglement Gain (`name_core`):**
   - US exact name match increased from `31.16%` $\to$ **`46.65%`** (+15.49% absolute gain).
-  - India exact name match increased from `17.87%` $\to$ **`26.13%`** (+8.26% absolute gain).
+  - India exact name match increased from `26.13%` (+8.26% absolute gain).
 * **Phonetic & Acronym Coverage:**
   - `name_phonetic` overlap: **`84.20%`** (US), **`56.80%`** (India).
   - `name_acronym` overlap: **`44.59%`** (US), **`32.04%`** (India).
@@ -92,5 +93,17 @@ flowchart TD
   - `name_clean`: 7,173,713 unique buckets (top-10 collision 0.14%).
   - `name_core`: 6,054,430 unique buckets (top-10 collision 0.15%).
   - `postal_clean`: 53,884 unique buckets (max bucket size 587).
+
+### Phase 3 Forensic Miss Audit & Optimization Findings
+1. **Empty Field Asymmetry in Multi-Match S1 Records:**
+   - Single S1 entities match multiple target entities (e.g. S2 and S3).
+   - Clean targets with both Name and Address receive composite synergy (+200 score).
+   - Secondary targets with Empty Names (Address-Only) or Empty Addresses (Name-Only) were previously pushed below Top-50 by composite records.
+   - **Solution:** Multi-modal Tiered Quotas (Tier 1: 60% Composite, Tier 2: 20% Guaranteed Address-Only, Tier 3: 20% Guaranteed Name-Only).
+2. **Concatenated Web Domain Names:**
+   - Web-scraped S3 records frequently have concatenated domain names (e.g. `summithealth com`, `burgersolution com`, `systelbuildstructureindia com`).
+   - **Solution:** Domain suffix stripping (`.com`, `.org`, `.in`, etc.) and bidirectional concatenated name indexing (`name_concat`), transforming them into instant exact core name matches (+95 score).
+3. **Dynamic IDF Posting List Traversal:**
+   - Replaced fixed 40-candidate posting list slicing with dynamic IDF-aware depth (full scan for rare distinctive tokens with IDF $\ge 3.0$).
 
 

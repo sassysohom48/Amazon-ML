@@ -128,11 +128,7 @@ class MultiChannelBlocker:
         if not raw_candidates:
             return []
 
-        ranked_candidates = sorted(
-            raw_candidates.items(),
-            key=lambda item: item[1]["score"],
-            reverse=True
-        )[:max_k]
+        ranked_candidates = c_idx.select_top_candidates(raw_candidates, max_k=max_k)
 
         cand_list = []
         for tgt_int_idx, info in ranked_candidates:

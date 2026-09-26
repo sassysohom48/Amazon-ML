@@ -58,12 +58,16 @@ def diagnose_misses(sample_size: int = 20):
     missed_pairs = []
     total_val_gt_pairs = 0
     captured_val_gt_pairs = 0
+    
+    val_eids_with_gt = set()
+    val_eids_with_captured_gt = set()
 
     for row in gt_df.iter_rows(named=True):
         s1 = str(row[s1_col]).strip()
         if s1 not in val_s1_eids:
             continue
 
+        val_eids_with_gt.add(s1)
         cands = cand_map[s1]
         targets_raw = str(row[tgt_col]).strip()
         for tid in targets_raw.split(","):
@@ -73,14 +77,19 @@ def diagnose_misses(sample_size: int = 20):
             total_val_gt_pairs += 1
             if tid_clean in cands:
                 captured_val_gt_pairs += 1
+                val_eids_with_captured_gt.add(s1)
             else:
                 missed_pairs.append((s1, tid_clean))
 
     pair_recall = (captured_val_gt_pairs / total_val_gt_pairs * 100.0) if total_val_gt_pairs > 0 else 0
+    entity_recall = (len(val_eids_with_captured_gt) / len(val_eids_with_gt) * 100.0) if val_eids_with_gt else 0
+
     print("\n" + "=" * 85)
-    print(f"VALIDATION CANDIDATE RECALL METRICS (Fold 0, K=50):")
+    print(f"VALIDATION CANDIDATE RECALL METRICS:")
+    print(f"  • Validation Entities with GT:    {len(val_eids_with_gt):,}")
+    print(f"  • Entities with >=1 Match Found:  {len(val_eids_with_captured_gt):,} ({entity_recall:.2f}% Entity Recall)")
     print(f"  • Total True Target Pairs in Val: {total_val_gt_pairs:,}")
-    print(f"  • Captured True Target Pairs:     {captured_val_gt_pairs:,} ({pair_recall:.2f}%)")
+    print(f"  • Captured True Target Pairs:     {captured_val_gt_pairs:,} ({pair_recall:.2f}% Pair Recall)")
     print(f"  • Missed True Target Pairs:       {len(missed_pairs):,} ({100.0 - pair_recall:.2f}%)")
     print("=" * 85)
 

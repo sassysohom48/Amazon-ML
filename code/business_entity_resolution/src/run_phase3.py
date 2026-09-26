@@ -19,7 +19,7 @@ from src.ablation_blocking import evaluate_blocking_benchmark
 
 
 def run_phase3_pipeline(
-    max_k: int = 50,
+    max_k: int = 60,
     run_benchmark: bool = True,
     generate_val_pairs: bool = True,
     generate_train_pairs: bool = False,
@@ -98,8 +98,17 @@ def run_phase3_pipeline(
 
 
 if __name__ == "__main__":
-    k = 50
-    for arg in sys.argv:
+    k = 60
+    benchmark_only = False
+    for arg in sys.argv[1:]:
         if arg.startswith("--k="):
             k = int(arg.split("=")[1])
-    run_phase3_pipeline(max_k=k)
+        elif arg.isdigit():
+            k = int(arg)
+        elif arg == "--benchmark-only":
+            benchmark_only = True
+    
+    if benchmark_only:
+        run_phase3_pipeline(max_k=k, run_benchmark=True, generate_val_pairs=False)
+    else:
+        run_phase3_pipeline(max_k=k, run_benchmark=True, generate_val_pairs=True)
