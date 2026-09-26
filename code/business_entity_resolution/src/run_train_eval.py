@@ -16,6 +16,7 @@ import time
 import json
 import gc
 from pathlib import Path
+from collections import defaultdict
 from typing import Dict, List, Set, Tuple, Optional, Any
 import numpy as np
 import polars as pl
@@ -86,6 +87,7 @@ def prepare_validation_candidate_features(
 ) -> Tuple[np.ndarray, List[str], List[str], List[str], List[str], Dict[str, Set[str]]]:
     """
     Extracts features for out-of-fold Fold 0 validation candidate pairs using lazy target lookup.
+    Supports both flat pair schemas (with provenance) and grouped candidate schemas.
     """
     print("\n" + "=" * 80)
     print(f"PREPARING OUT-OF-FOLD (FOLD 0) VALIDATION SET ({max_val_entities:,} Entities)")
@@ -128,30 +130,59 @@ def prepare_validation_candidate_features(
     print(f"Loading candidate pairs from {val_cand_path.name}...")
     val_cand_df = pl.read_parquet(val_cand_path)
 
-    # Sample representative validation slice if requested
-    if max_val_entities > 0 and len(val_cand_df) > max_val_entities:
-        np.random.seed(random_seed)
-        val_cand_sample = val_cand_df.sample(n=max_val_entities, seed=random_seed)
-    else:
-        val_cand_sample = val_cand_df
-
-    val_s1_ids = val_cand_sample["source1_entity_id"].to_list()
-    val_cands_str = val_cand_sample["candidate_entity_ids"].to_list()
-
-    # Flatten candidate pairs
     flat_s1 = []
     flat_tgt = []
+    flat_prov = []
     needed_tgt_ids = set()
+    val_s1_ids = []
 
-    for s1_id, c_str in zip(val_s1_ids, val_cands_str):
-        if not c_str:
-            continue
-        for tgt in str(c_str).split(","):
-            tgt_clean = tgt.strip()
-            if tgt_clean:
-                flat_s1.append(s1_id)
-                flat_tgt.append(tgt_clean)
-                needed_tgt_ids.add(tgt_clean)
+    # Check schema: Flat pairs (Phase 3 format) vs Grouped string
+    if "target_entity_id" in val_cand_df.columns:
+        # Flat schema with provenance
+        all_unique_s1 = val_cand_df["source1_entity_id"].unique().to_list()
+        if max_val_entities > 0 and len(all_unique_s1) > max_val_entities:
+            np.random.seed(random_seed)
+            selected_s1 = set(np.random.choice(all_unique_s1, size=max_val_entities, replace=False))
+            val_cand_filtered = val_cand_df.filter(pl.col("source1_entity_id").is_in(selected_s1))
+            val_s1_ids = list(selected_s1)
+        else:
+            val_cand_filtered = val_cand_df
+            val_s1_ids = all_unique_s1
+
+        prov_cols = [c for c in val_cand_filtered.columns if c not in ("source1_entity_id", "target_entity_id")]
+
+        for row in val_cand_filtered.iter_rows(named=True):
+            s1_id = str(row["source1_entity_id"]).strip()
+            tgt_id = str(row["target_entity_id"]).strip()
+            prov = {c: row[c] for c in prov_cols}
+            flat_s1.append(s1_id)
+            flat_tgt.append(tgt_id)
+            flat_prov.append(prov)
+            needed_tgt_ids.add(tgt_id)
+    else:
+        # Grouped comma-separated candidate string
+        cand_col = "candidate_entity_ids" if "candidate_entity_ids" in val_cand_df.columns else val_cand_df.columns[1]
+        s1_id_col = "source1_entity_id" if "source1_entity_id" in val_cand_df.columns else val_cand_df.columns[0]
+
+        if max_val_entities > 0 and len(val_cand_df) > max_val_entities:
+            np.random.seed(random_seed)
+            val_cand_sample = val_cand_df.sample(n=max_val_entities, seed=random_seed)
+        else:
+            val_cand_sample = val_cand_df
+
+        val_s1_ids = val_cand_sample[s1_id_col].to_list()
+        val_cands_str = val_cand_sample[cand_col].to_list()
+
+        for s1_id, c_str in zip(val_s1_ids, val_cands_str):
+            if not c_str:
+                continue
+            for tgt in str(c_str).split(","):
+                tgt_clean = tgt.strip()
+                if tgt_clean:
+                    flat_s1.append(s1_id)
+                    flat_tgt.append(tgt_clean)
+                    flat_prov.append({})
+                    needed_tgt_ids.add(tgt_clean)
 
     print(f"Evaluated Fold 0 Slice: {len(val_s1_ids):,} entities -> {len(flat_s1):,} candidate pairs ({len(needed_tgt_ids):,} unique targets).")
 
@@ -194,11 +225,11 @@ def prepare_validation_candidate_features(
     val_countries = []
     val_sources = []
 
-    for idx, (s1_id, tgt_id) in enumerate(zip(flat_s1, flat_tgt), 1):
+    for idx, (s1_id, tgt_id, prov) in enumerate(zip(flat_s1, flat_tgt, flat_prov), 1):
         s1_rec = s1_records.get(s1_id, {})
         tgt_rec = tgt_records.get(tgt_id, {})
 
-        feat_vec = extractor.extract_pair_features(s1_rec, tgt_rec)
+        feat_vec = extractor.extract_pair_features(s1_rec, tgt_rec, prov)
         val_features.append(feat_vec)
         val_countries.append(str(s1_rec.get("country", "Unknown") or "Unknown"))
         val_sources.append("S2" if tgt_id.startswith("S2") else "S3")
@@ -213,7 +244,7 @@ def prepare_validation_candidate_features(
     # Filter GT map to only evaluated entities
     eval_gt_map = {s1: val_gt_map.get(s1, set()) for s1 in val_s1_ids}
 
-    del s1_records, tgt_records, val_features
+    del s1_records, tgt_records, val_features, flat_prov
     gc.collect()
 
     return X_val, flat_s1, flat_tgt, val_countries, val_sources, eval_gt_map
