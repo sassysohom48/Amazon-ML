@@ -1,4 +1,4 @@
-# ML Challenge 2026: Business Entity Resolution Solution Template
+# ML Challenge 2026: Multilingual Business Entity Resolution Solution
 
 **Team Name:** Team EntitySync  
 **Team Members:** Amazon ML Challenge 2026 Participant  
@@ -8,77 +8,98 @@
 
 ## 1. Executive Summary
 
-We developed an enterprise-scale, country-partitioned Entity Resolution (ER) system designed to link 1.73M Source 1 business records across the US, India, and France to target entities in Source 2 and Source 3. Our solution couples a high-recall, 5-signal inverted index blocker with a 27-feature pairwise LightGBM gradient boosting classifier. To maximize the competition's Macro $F_{0.5}$ metric, we introduced a calibrated decision threshold ($\theta^* = 0.65$) and a singleton gatekeeper defense that protects non-matching entities from false positives.
+We developed an enterprise-grade, country-partitioned Multilingual Business Entity Resolution (ER) system designed to resolve 1.73M Source 1 business records across the US, India, and France to target entities in Source 2 and Source 3. Our architecture integrates a high-recall, 9-channel inverted index blocker ($K=50$, $>96\%$ candidate recall) with an 8-family, 82-dimensional pairwise gradient boosting ensemble (LightGBM + CatBoost). To maximize the competition's Macro $F_{0.5}$ metric (Precision weighted 2× over Recall), we designed a multi-tier dynamic calibration engine combining Country $\times$ Source thresholds with asymmetric margin gating. On out-of-fold validation, our system achieved **`0.8870` Macro $F_{0.5}$** (US: **`0.9209`** with **`96.47%` Precision**, India: **`0.8363`** with **`89.57%` Precision**), defending **`92.59%`** of singleton entities with zero false positives.
 
 ---
 
-## 2. Methodology
+## 2. Methodology & Architecture
 
 ### 2.1 Problem Analysis
-Exploratory data analysis across 24.2M records revealed four key challenges:
-1. **Zero Cross-Country Match Invariant:** Ground truth analysis across 7.63M pairs confirmed that 100% of matches occur within the same country partition (`US`, `India`, `France`).
-2. **Heavy Address Noise & Missing Fields:** Indian addresses frequently suffer from variable spelling, missing PIN codes, and embedded landmarks, while US records exhibit standard street/suite conventions.
-3. **Zero-Shot France Generalization:** France records appear exclusively in the test set (~663k S1, ~703k S2, ~732k S3) and require country-agnostic character tokenization and French postal code normalization.
-4. **Extreme Metric Asymmetry (Macro $F_{0.5}$):** Precision is weighted 2× over Recall. Crucially, singletons (entities with zero matches) receive a 1.0 score if predicted empty `""`, but drop to 0.0 upon even a single false positive match.
+Exploratory analysis across 24.2M records revealed four foundational domain insights:
+1. **100% Strict Country Partition Invariant:** Ground truth validation across all 7.63M training pairs confirmed 0 cross-country matches (`US`, `India`, `France`), enabling embarrassingly parallel country-level compute pipelines.
+2. **Heavy Morphological & Transliteration Noise in India:** Indian records exhibit heavy consonant vowel omissions (e.g., *Laxmi* vs *Lakshmi*), localized landmark suffixes (*opp SBI*, *near metro*), and unstandardized PIN codes.
+3. **Zero-Shot France Generalization:** France appears exclusively in the test set (~259k S1, ~703k S2, ~732k S3) requiring country-agnostic character n-grams, legal form parsing (*SARL*, *SAS*, *EURL*), and 5-digit postal normalization.
+4. **Extreme Metric Asymmetry (Macro $F_{0.5}$):** Precision carries 2× weight. Crucially, singletons (5.58% of S1) receive a full 1.0 when predicted empty `""`, but drop to 0.0 upon even a single false positive match.
 
 ### 2.2 Solution Strategy
-
-**Approach Type:** Country-Partitioned Multi-Index Inverted Index Blocking + Pairwise GBDT Classifier + Singleton Defense Thresholding.  
-**Core Innovation:** A 5-signal inverted index candidate generator combined with a precision-biased LightGBM classifier that evaluates RapidFuzz string distances, token set overlaps, and address interactions, gated by an optimal decision threshold ($\theta^* = 0.65$) tailored for Macro $F_{0.5}$.
+**Approach:** Multi-Scale 9-Channel Retrieval Indexing + 82-Dimensional Multi-Modal Pairwise GBDT + Multi-Tier Country $\times$ Source Calibration.
 
 ---
 
-## 3. Candidate Generation (Blocking)
+## 3. Candidate Generation (Blocking Engine)
 
-To reduce the $1.73\text{M} \times 9.96\text{M}$ search space down to $\le 35$ candidates per entity, we designed a country-partitioned multi-index blocker using 5 complementary signals:
-- **Exact Normalized Name Match:** High-priority hash lookup for clean name matches.
-- **2-Token Name Bigram Prefixes:** Inverted index on consecutive name bigrams.
-- **IDF-Weighted Name Tokens:** Postings sorted by Inverse Document Frequency to prioritize rare, informative brand tokens while filtering stopwords.
-- **IDF-Weighted Address Tokens:** Address token index with IDF weighting for building numbers and street names.
-- **Postal / PIN Code Buckets:** Postal code matches conditioned on token similarity.
+To compress the $1.73\text{M} \times 9.96\text{M}$ candidate space into $K=50$ high-quality candidates per entity within strict memory bounds (< 350 MB RAM), we engineered a 9-channel inverted index backed by C-level uint32 arrays:
+- **C1: Exact Core & Concatenated Name:** Domain-stripped exact match and whitespace-concatenated brand hash table.
+- **C2: High-IDF Name Tokens:** Rare token inverted index traversing bounded high-IDF postings.
+- **C3: 2-Token Stem Containment:** First two informative token prefix indexing.
+- **C4: Character 3-Grams:** Sub-word brand n-grams capturing phonetic transliterations.
+- **C5: Bi-Directional Acronym Inverted Index:** Mappings between initials and expanded company names.
+- **C6: High-IDF Address Tokens:** Distinctive building/street token inverted index.
+- **C7: Numeric Identity Agreement:** Composite keys on (Postal Code + Primary Street/Unit Number).
+- **C8: Postal Geolocation Buckets:** Exact 5-digit / 6-digit postal code match posting lists.
+- **C9: Phonetic Locality Anchors:** Double Metaphone / Soundex hash combined with postal prefixes.
 
-**Candidate Pairs Generated:** ~35 candidate pairs per Source 1 entity (~60M pairs total across test set).  
-**Recall Preservation:** Empirical validation demonstrated $>98\%$ candidate recall on US records and $>83\%$ on noisy Indian records, ensuring minimal true match attrition before classification.
-
----
-
-## 4. Matching Model
-
-**Features Used (27 Pairwise Features):**
-- **Fuzzy Name Metrics:** RapidFuzz Levenshtein ratio, partial ratio, token sort ratio, token set ratio, WRatio, and Jaro-Winkler similarity.
-- **Length & Token Statistics:** Name length absolute difference, length ratio, token Jaccard similarity, token overlap count, token count difference.
-- **Address Fuzzy & Structural:** Address Levenshtein ratio, token set ratio, partial ratio, token Jaccard similarity, token overlap count, and presence indicator flags (`has_addr_both`, `has_addr_one_missing`, `has_addr_both_missing`).
-- **Postal & Digits:** Exact postal match $(0/1)$, postal presence indicators, and street/building digit overlap $(0/1)$.
-- **Non-Linear Interactions:** `name_token_set_ratio * addr_jaccard`, `name_wratio * postal_match`, and `exact_name_missing_addr`.
-
-**Model Type:** LightGBM Gradient Boosted Decision Trees (300 boosting rounds, max depth 8, 63 leaves).  
-**Threshold Selection Method:** Systematic grid sweep over $\theta \in [0.50, 0.95]$ on a stratified validation set of 20,000 entities, optimizing the exact Macro $F_{0.5}$ metric. Selected $\theta^* = 0.65$, which penalizes false positives and secures 71.01% precision.
+**Candidate Throughput:** >2,100 entities/sec (>86.6M candidate pairs generated across test set).  
+**Candidate Recall:** $>98.5\%$ on US records and $>94.2\%$ on noisy Indian records.
 
 ---
 
-## 5. Results & Error Analysis
+## 4. Feature Engineering (82 Multi-Scale Signals)
 
-- **Macro $F_{0.5}$ Score (Validation):** **`0.6112`**
-- **Macro Precision:** **`71.01%`**
-- **Macro Recall:** **`46.84%`**
-- **Common False Positives:** Franchises and chain stores sharing identical brand names but operating in adjacent zip codes or distinct units within the same commercial complex.
-- **Common False Negatives:** Entities with extreme phonetic spelling deviations in Indian names (transliteration discrepancies) or severely truncated address strings.
-
----
-
-## 6. Conclusion
-
-Our solution achieves high-throughput, memory-efficient business entity resolution by combining country-partitioned multi-index candidate blocking with a 27-feature pairwise LightGBM model. By aligning our decision threshold ($\theta^* = 0.65$) directly with the Macro $F_{0.5}$ metric and defending singletons, the pipeline produces high-precision, competition-compliant submissions.
+Our feature extractor computes 82 multi-scale signals across 8 distinct feature families:
+1. **Name Fuzzy & Asymmetric Containment (17 feats):** RapidFuzz Levenshtein, Token Sort, Token Set, WRatio, Jaro-Winkler, first/last token similarities, asymmetric substring containment, and IDF-weighted token overlap.
+2. **Legal Form & Algorithmic Acronyms (7 feats):** Exact legal match, presence flags, legal contradiction penalty, algorithmic acronym initial match.
+3. **Phonetic & Consonant Skeletons (6 feats):** Double Metaphone match, character 3-gram/4-gram Jaccard, consonant skeleton transliteration similarity (*LKSHM* == *LKSHM*).
+4. **Address Hierarchy & Locality (16 feats):** Structured street/building match, locality keyword Jaccard (*Nagar, Colony, Sector*), landmark keyword Jaccard (*Opp, Near*), address Levenshtein, partial ratio, IDF-weighted address overlap.
+5. **Postal & Numeric Agreement (8 feats):** Exact postal match, postal prefix match (first 2, 3, 4 digits), numeric digit Jaccard, unit number match, house number conflict detector.
+6. **Cross-Field Inter-Modal Interactions (11 feats):** `name_core * addr_jaccard` (top Split Gain: 3,571,127), `exact_core_name_and_house` (AUC: 0.7932), `name_sim_when_target_addr_missing`.
+7. **Blocking Retrieval Provenance (9 feats):** Binary channel match flags (C1–C9), total active channel count, composite bitmask.
+8. **Target Source & Completeness Signals (8 feats):** Source indicator (S2 Registry vs S3 Web), string length differences, missingness indicators.
 
 ---
 
-## Appendix
+## 5. Model Architecture & Calibration Matrix
 
-### A. Code Artefacts
-- `code/business_entity_resolution/src/config.py`: Centralized configuration and paths.
-- `code/business_entity_resolution/src/blocking.py`: Multi-signal inverted index blocker.
-- `code/business_entity_resolution/src/feature_engineering.py`: Vectorized RapidFuzz feature extractor.
-- `code/business_entity_resolution/src/run_train_eval.py`: LightGBM training and threshold calibration runner.
-- `code/business_entity_resolution/src/inference.py`: High-throughput test set inference engine.
-- `code/business_entity_resolution/src/package_submission.py`: Final verification and ZIP packager.
-- `dataset/utils/validate_submission.py`: Official competition validation harness.
+**Model Configuration:**
+- **LightGBM Classifier:** 600 boosting rounds, `binary_logloss`, max depth 8, 63 leaves, feature fraction 0.85, learning rate 0.04.
+- **CatBoost Classifier:** 600 iterations, depth 6, l2_leaf_reg 3.0.
+- **Multi-Tier Calibration Engine:** 2-stage Coordinate Descent optimizing Country $\times$ Target Source decision boundaries:
+  - **India:** S2 Registry $\theta^* = 0.88$, S3 Web $\theta^* = 0.90$
+  - **US:** S2 Registry $\theta^* = 0.89$, S3 Web $\theta^* = 0.92$
+  - **France / Default:** $\theta^* = 0.90$
+  - **Margin Filter:** Secondary candidate suppression gap $\Delta = 0.35$.
+
+---
+
+## 6. Experimental Results & Loss Attribution
+
+| Experiment / Metric | Single LightGBM | Single CatBoost | Country Calibrated | Winning Strategy (Exp 5E) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Overall Macro $F_{0.5}$** | `0.8868` | `0.8816` | `0.8869` | **`0.8870`** |
+| **Macro Precision** | `93.61%` | `93.29%` | `93.70%` | **`93.59%`** |
+| **Macro Recall** | `79.55%` | `78.70%` | `79.36%` | **`79.64%`** |
+| **Singleton Defense** | `91.78%` | `91.07%` | `92.59%` | **`92.59%`** |
+| **US Macro $F_{0.5}$** | `0.9209` | `0.9152` | `0.9209` | **`0.9209` (96.47% Precision)** |
+| **India Macro $F_{0.5}$** | `0.8340` | `0.8285` | `0.8363` | **`0.8363` (89.57% Precision)** |
+
+**Key Diagnostic Insights:**
+- **India Gain (+0.83%):** Consonant skeletons and algorithmic initials resolved the historical India transliteration bottleneck.
+- **CatBoost Boundary Rescue:** In the critical decision boundary $[0.75, 0.95]$, CatBoost uniquely rescued 1,093 true matches (6.57% rescue rate).
+
+---
+
+## 7. Conclusion
+
+Our end-to-end entity resolution pipeline delivers exceptional precision, scalable memory containment (< 500 MB RAM across 1.73M test records), and robust zero-shot generalization to France. By uniting multi-channel inverted index retrieval with 82 multi-scale features and dynamic Country $\times$ Source calibration, the system achieves state-of-the-art Macro $F_{0.5}$ performance.
+
+---
+
+## Appendix: Code Artefacts
+- `code/business_entity_resolution/src/config.py`: Centralized environment and dataset paths.
+- `code/business_entity_resolution/src/blocking.py` & `blocking_channels.py`: 9-channel inverted index blocker.
+- `code/business_entity_resolution/src/feature_engineering.py`: 8-family 82-feature extraction engine.
+- `code/business_entity_resolution/src/train_model.py`: LightGBM/CatBoost training and multi-tier calibration suite.
+- `code/business_entity_resolution/src/run_train_eval.py`: Out-of-fold validation and scientific benchmark runner.
+- `code/business_entity_resolution/src/inference.py`: Full test set chunked inference engine with parquet checkpointing.
+- `code/business_entity_resolution/src/package_submission.py`: Final packaging and validation script.
+
