@@ -134,32 +134,22 @@ class MultiChannelBlocker:
         ranked_candidates = c_idx.select_top_candidates(raw_candidates, max_k=max_k)
 
         cand_list = []
-        for tgt_int_idx, info in ranked_candidates:
+        for tgt_int_idx, c in ranked_candidates:
             tgt_eid = c_idx.target_ids[tgt_int_idx]
-            mask = (
-                (info["c_name_core"] << 8) |
-                (info["c_name_token"] << 7) |
-                (info["c_name_contain"] << 6) |
-                (info["c_char_3gram"] << 5) |
-                (info["c_acronym"] << 4) |
-                (info["c_addr_token"] << 3) |
-                (info["c_addr_numeric"] << 2) |
-                (info["c_postal"] << 1) |
-                (info["c_phonetic"] << 0)
-            )
+            mask = c[3]
             cand_list.append({
                 "target_id": tgt_eid,
-                "score": round(info["score"], 2),
-                "c_name_core": info["c_name_core"],
-                "c_name_token": info["c_name_token"],
-                "c_name_contain": info["c_name_contain"],
-                "c_char_3gram": info["c_char_3gram"],
-                "c_acronym": info["c_acronym"],
-                "c_addr_token": info["c_addr_token"],
-                "c_addr_numeric": info["c_addr_numeric"],
-                "c_postal": info["c_postal"],
-                "c_phonetic": info["c_phonetic"],
-                "num_channels": info["num_channels"],
+                "score": round(c[0], 2),
+                "c_name_core": (mask >> 8) & 1,
+                "c_name_token": (mask >> 7) & 1,
+                "c_name_contain": (mask >> 6) & 1,
+                "c_char_3gram": (mask >> 5) & 1,
+                "c_acronym": (mask >> 4) & 1,
+                "c_addr_token": (mask >> 3) & 1,
+                "c_addr_numeric": (mask >> 2) & 1,
+                "c_postal": (mask >> 1) & 1,
+                "c_phonetic": mask & 1,
+                "num_channels": c[4],
                 "channel_mask": mask,
             })
         return cand_list
@@ -190,22 +180,49 @@ class MultiChannelBlocker:
         t_start = time.time()
         for i in range(n_rows):
             c_name = str(countries[i]) if countries[i] else "Unknown"
-            cands = self.query_entity_candidates(
-                country=c_name,
+            c_idx = self.country_indexes.get(c_name)
+            if c_idx is None:
+                results[eids[i]] = []
+                continue
+
+            raw_cands = c_idx.query_channels(
                 name_clean=str(name_cleans[i]) if name_cleans[i] else "",
                 name_core=str(name_cores[i]) if name_cores[i] else "",
-                name_tokens=str(name_tokens[i]) if name_tokens[i] else "",
+                name_tokens_str=str(name_tokens[i]) if name_tokens[i] else "",
                 name_acronym=str(acronyms[i]) if acronyms[i] else "",
                 name_phonetic=str(phonetics[i]) if phonetics[i] else "",
                 addr_clean=str(addr_cleans[i]) if addr_cleans[i] else "",
-                addr_tokens=str(addr_tokens[i]) if addr_tokens[i] else "",
-                addr_digits=str(addr_digits[i]) if addr_digits[i] else "",
+                addr_tokens_str=str(addr_tokens[i]) if addr_tokens[i] else "",
+                addr_digits_str=str(addr_digits[i]) if addr_digits[i] else "",
                 addr_unit_num=str(addr_units[i]) if addr_units[i] else "",
                 postal_clean=str(postals[i]) if postals[i] else "",
-                max_k=max_k,
             )
-            results[eids[i]] = cands
-            if (i + 1) % 10000 == 0 or (i + 1) == n_rows:
+            if not raw_cands:
+                results[eids[i]] = []
+            else:
+                ranked = c_idx.select_top_candidates(raw_cands, max_k=max_k)
+                cand_list = []
+                for tgt_int_idx, c in ranked:
+                    tgt_eid = c_idx.target_ids[tgt_int_idx]
+                    mask = c[3]
+                    cand_list.append({
+                        "target_id": tgt_eid,
+                        "score": round(c[0], 2),
+                        "c_name_core": (mask >> 8) & 1,
+                        "c_name_token": (mask >> 7) & 1,
+                        "c_name_contain": (mask >> 6) & 1,
+                        "c_char_3gram": (mask >> 5) & 1,
+                        "c_acronym": (mask >> 4) & 1,
+                        "c_addr_token": (mask >> 3) & 1,
+                        "c_addr_numeric": (mask >> 2) & 1,
+                        "c_postal": (mask >> 1) & 1,
+                        "c_phonetic": mask & 1,
+                        "num_channels": c[4],
+                        "channel_mask": mask,
+                    })
+                results[eids[i]] = cand_list
+
+            if (i + 1) % 25000 == 0 or (i + 1) == n_rows:
                 speed = (i + 1) / (time.time() - t_start)
                 print(f"  Blocked {i + 1:,} / {n_rows:,} entities ({speed:,.0f} ent/s)...")
 
