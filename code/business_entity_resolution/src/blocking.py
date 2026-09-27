@@ -197,49 +197,58 @@ class HighRecallCountryIndex:
                 for t_idx in targets[:200]:
                     candidate_scores[t_idx] += 5.0
 
-        # --- Channel 2: Distinctive Name Tokens & Stems (Tiered High-IDF Capped) ---
+        # --- Channel 2: Distinctive Name Tokens & Stems (Adaptive IDF & Fallback) ---
         tokens = extract_informative_tokens(c_name)
-        for tok in tokens:
-            idf = self.token_idf.get(tok, 0.0)
-            if idf > 2.0:
+        if tokens:
+            token_idf_pairs = [(tok, self.token_idf.get(tok, 0.0)) for tok in tokens]
+            # Primary: tokens with IDF >= 1.4 (broad net for commercial and common terms)
+            eligible_tokens = [p for p in token_idf_pairs if p[1] >= 1.4]
+            # Fallback: if all tokens are high-frequency (IDF < 1.4), take top-2 highest available
+            if not eligible_tokens:
+                eligible_tokens = sorted(token_idf_pairs, key=lambda x: x[1], reverse=True)[:2]
+
+            for tok, idf in eligible_tokens:
                 targets = self.c2_token_postings.get(tok)
                 if targets:
-                    weight = idf * 2.2
+                    weight = max(idf, 1.0) * 2.2
                     # Tiered caps: rare tokens get wide net, common tokens capped safely
                     if idf >= 4.5:
                         limit = 500
-                    elif idf >= 3.0:
+                    elif idf >= 2.5:
                         limit = 250
                     else:
                         limit = 120
                     for t_idx in targets[:limit]:
                         candidate_scores[t_idx] += weight
 
-        # --- Channel 3: Boundary Character 3-Grams (Typo Highway) ---
+        # --- Channel 3: Boundary Character 3-Grams (Typo Highway Widened) ---
         if c_name:
             shingles = extract_char_3grams(c_name)
-            distinctive_shingles = sorted(
-                [sh for sh in shingles if self.char3_idf.get(sh, 0.0) >= 3.5],
-                key=lambda x: self.char3_idf[x],
-                reverse=True
-            )[:4]
+            shingle_idfs = [(sh, self.char3_idf.get(sh, 0.0)) for sh in shingles]
+            # Lower threshold to 2.5, or fall back to top-6 most distinctive shingles
+            distinctive_shingles = [p for p in shingle_idfs if p[1] >= 2.5]
+            if len(distinctive_shingles) < 4:
+                distinctive_shingles = sorted(shingle_idfs, key=lambda x: x[1], reverse=True)[:6]
+            else:
+                distinctive_shingles = sorted(distinctive_shingles, key=lambda x: x[1], reverse=True)[:6]
 
-            for sh in distinctive_shingles:
+            for sh, idf in distinctive_shingles:
                 targets = self.c3_char3_postings.get(sh)
                 if targets:
-                    weight = self.char3_idf[sh] * 0.5
-                    # Capped to top 150 most informative candidates (balanced S2/S3)
-                    for t_idx in targets[:150]:
+                    weight = max(idf, 1.0) * 0.8
+                    # Capped to top 200 candidates per shingle
+                    for t_idx in targets[:200]:
                         candidate_scores[t_idx] += weight
 
-        # --- Channel 4: Address Locality Anchors ---
+        # --- Channel 4: Address Locality & Landmark Anchors ---
         if c_addr:
             anchors = extract_address_anchors(c_addr)
             for anchor in anchors:
                 targets = self.c4_addr_postings.get(anchor)
                 if targets:
+                    weight = 7.0 if not anchor.startswith("lm_") else 5.0
                     for t_idx in targets[:200]:
-                        candidate_scores[t_idx] += 6.0
+                        candidate_scores[t_idx] += weight
 
         # --- Channel 5: Standalone Postal PIN Codes ---
         if c_addr:
@@ -247,8 +256,8 @@ class HighRecallCountryIndex:
             for pin in postals:
                 targets = self.c5_postal_postings.get(pin)
                 if targets:
-                    for t_idx in targets[:250]:
-                        candidate_scores[t_idx] += 7.5
+                    for t_idx in targets[:200]:
+                        candidate_scores[t_idx] += 6.5
 
         if not candidate_scores:
             return []
