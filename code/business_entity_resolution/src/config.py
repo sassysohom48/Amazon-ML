@@ -16,7 +16,9 @@ TEST_DIR = RAW_DIR / "test"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 PROCESSED_DIR = DATASET_DIR / "processed"
 MODELS_DIR = PROJECT_ROOT / "code" / "business_entity_resolution" / "models"
-VALIDATION_SCRIPT = DATASET_DIR / "utils" / "validate_submission.py"
+VALIDATION_SCRIPT = PROJECT_ROOT / "code" / "business_entity_resolution" / "src" / "validate_submission.py"
+if not VALIDATION_SCRIPT.exists() and (DATASET_DIR / "utils" / "validate_submission.py").exists():
+    VALIDATION_SCRIPT = DATASET_DIR / "utils" / "validate_submission.py"
 SUBMISSION_MATCHING_TSV = OUTPUT_DIR / "matching_results.tsv"
 SUBMISSION_CANDIDATE_TSV = OUTPUT_DIR / "candidate_pairs.tsv"
 
