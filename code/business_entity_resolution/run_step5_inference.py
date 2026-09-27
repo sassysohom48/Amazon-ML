@@ -15,5 +15,6 @@ if str(current_dir) not in sys.path:
 from src.inference import run_full_inference
 
 if __name__ == "__main__":
-    print("Launching Step 5: Full Test Inference & Submission Generation...")
-    run_full_inference()
+    force = "--force" in sys.argv or "-f" in sys.argv
+    print(f"Launching Step 5: Full Test Inference & Submission Generation (force_recompute={force})...")
+    run_full_inference(force_recompute=force)

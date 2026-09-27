@@ -86,14 +86,29 @@ class HighRecallCountryIndex:
     def fit_target_pool(self, df_s2: pl.DataFrame, df_s3: pl.DataFrame) -> None:
         """
         Indexes all S2 + S3 target entities across all 5 retrieval channels.
+        Uniformly interleaves S2 and S3 to guarantee neither source is starved during posting traversal.
         """
         start_time = time.time()
         print(f"\nBuilding High-Recall Multi-Channel Index for country [{self.country}]...")
 
-        combined_df = pl.concat([
-            df_s2.select(["entity_id", "business_name", "business_address"]),
-            df_s3.select(["entity_id", "business_name", "business_address"])
-        ])
+        n_s2 = df_s2.height if not df_s2.is_empty() else 0
+        n_s3 = df_s3.height if not df_s3.is_empty() else 0
+
+        # Uniform S2/S3 Interleaving: guarantees equitable candidate retrieval
+        if n_s2 > 0 and n_s3 > 0:
+            df_s2_sub = df_s2.select(["entity_id", "business_name", "business_address"]).with_columns(
+                pl.Series("interleave_pos", np.linspace(0.0, 1.0, n_s2, endpoint=False, dtype=np.float64))
+            )
+            df_s3_sub = df_s3.select(["entity_id", "business_name", "business_address"]).with_columns(
+                pl.Series("interleave_pos", np.linspace(0.0, 1.0, n_s3, endpoint=False, dtype=np.float64) + 1e-9)
+            )
+            combined_df = pl.concat([df_s2_sub, df_s3_sub]).sort("interleave_pos").drop("interleave_pos")
+        elif n_s2 > 0:
+            combined_df = df_s2.select(["entity_id", "business_name", "business_address"])
+        elif n_s3 > 0:
+            combined_df = df_s3.select(["entity_id", "business_name", "business_address"])
+        else:
+            combined_df = pl.DataFrame()
 
         n_targets = combined_df.height
         self.target_ids = combined_df["entity_id"].to_list()
@@ -150,7 +165,7 @@ class HighRecallCountryIndex:
             self.char3_idf[sh] = math.log(1.0 + (n_targets - df_val + 0.5) / (df_val + 0.5))
 
         elapsed = time.time() - start_time
-        print(f"    [{self.country}] Multi-Channel Index built for {n_targets:,} records in {elapsed:.2f}s "
+        print(f"    [{self.country}] Multi-Channel Index built for {n_targets:,} records (S2: {n_s2:,}, S3: {n_s3:,}, Interleaved) in {elapsed:.2f}s "
               f"(C1 Sorted+Phonetic: {len(self.c1_sorted_postings):,}, "
               f"C2 Tokens: {len(self.c2_token_postings):,}, "
               f"C3 Char3: {len(self.c3_char3_postings):,}, "
@@ -159,9 +174,8 @@ class HighRecallCountryIndex:
 
     def query_single_entity(self, c_name: str, c_addr: str, max_k: int) -> List[str]:
         """
-        Fast in-memory candidate query with High-IDF posting caps.
-        Limits posting traversal on common terms to top 80-150 candidates,
-        providing a 5-10x speedup with zero recall penalty.
+        Fast in-memory candidate query with balanced S2/S3 High-IDF posting caps.
+        Limits posting traversal to top candidates while ensuring neither S2 nor S3 is starved.
         """
         candidate_scores: Dict[int, float] = defaultdict(float)
 
@@ -171,18 +185,18 @@ class HighRecallCountryIndex:
             targets = self.c1_sorted_postings.get(sk)
             if targets:
                 weight = 10.0 if k_idx == 0 else 6.0
-                # Cap posting traversal for common keys to top 150
-                for t_idx in targets[:150]:
+                # Cap posting traversal for common keys to top 250 (balanced S2/S3)
+                for t_idx in targets[:250]:
                     candidate_scores[t_idx] += weight
 
         phonetics = extract_phonetic_keys(c_name)
         for ph in phonetics:
             targets = self.c1_sorted_postings.get(ph)
             if targets:
-                for t_idx in targets[:100]:
+                for t_idx in targets[:200]:
                     candidate_scores[t_idx] += 5.0
 
-        # --- Channel 2: Distinctive Name Tokens & Stems (High-IDF Capped) ---
+        # --- Channel 2: Distinctive Name Tokens & Stems (Tiered High-IDF Capped) ---
         tokens = extract_informative_tokens(c_name)
         for tok in tokens:
             idf = self.token_idf.get(tok, 0.0)
@@ -190,8 +204,13 @@ class HighRecallCountryIndex:
                 targets = self.c2_token_postings.get(tok)
                 if targets:
                     weight = idf * 2.2
-                    # Rare tokens (high IDF) traverse up to 500; common tokens capped at 80
-                    limit = 500 if idf > 4.5 else 80
+                    # Tiered caps: rare tokens get wide net, common tokens capped safely
+                    if idf >= 4.5:
+                        limit = 500
+                    elif idf >= 3.0:
+                        limit = 250
+                    else:
+                        limit = 120
                     for t_idx in targets[:limit]:
                         candidate_scores[t_idx] += weight
 
@@ -208,8 +227,8 @@ class HighRecallCountryIndex:
                 targets = self.c3_char3_postings.get(sh)
                 if targets:
                     weight = self.char3_idf[sh] * 0.5
-                    # Capped to top 80 most informative candidates
-                    for t_idx in targets[:80]:
+                    # Capped to top 150 most informative candidates (balanced S2/S3)
+                    for t_idx in targets[:150]:
                         candidate_scores[t_idx] += weight
 
         # --- Channel 4: Address Locality Anchors ---
@@ -218,7 +237,7 @@ class HighRecallCountryIndex:
             for anchor in anchors:
                 targets = self.c4_addr_postings.get(anchor)
                 if targets:
-                    for t_idx in targets[:100]:
+                    for t_idx in targets[:200]:
                         candidate_scores[t_idx] += 6.0
 
         # --- Channel 5: Standalone Postal PIN Codes ---
@@ -227,7 +246,7 @@ class HighRecallCountryIndex:
             for pin in postals:
                 targets = self.c5_postal_postings.get(pin)
                 if targets:
-                    for t_idx in targets[:150]:
+                    for t_idx in targets[:250]:
                         candidate_scores[t_idx] += 7.5
 
         if not candidate_scores:
@@ -241,7 +260,7 @@ class HighRecallCountryIndex:
         self,
         df_s1: pl.DataFrame,
         max_k: int = 100,
-        num_workers: int = 4
+        num_workers: int = 6
     ) -> Dict[str, List[str]]:
         """
         Queries the multi-channel index for S1 records using multi-process parallel execution.
