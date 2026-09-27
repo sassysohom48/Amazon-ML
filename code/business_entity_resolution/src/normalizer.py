@@ -246,14 +246,13 @@ def extract_address_anchors(addr_clean: str) -> List[str]:
     Extracts multi-token address anchors:
     - (street_number + locality_word) e.g. '1795_westchester', '797_lake'
     - (locality_word + street_number)
-    - Landmark word bigrams (e.g. 'lm_bus_stand', 'lm_station_road') for non-numeric/Indian addresses
     """
     if not addr_clean:
         return []
     tokens = addr_clean.split()
     anchors = []
 
-    # 1. Extract digit + adjacent informative word anchors
+    # Extract digit + adjacent informative word anchors
     for i, tok in enumerate(tokens):
         if tok.isdigit() and len(tok) >= 1:
             # Pair with next non-stopword token
@@ -266,13 +265,5 @@ def extract_address_anchors(addr_clean: str) -> List[str]:
                 prev_t = tokens[i - 1]
                 if len(prev_t) >= 3 and prev_t not in ADDR_STOPWORDS and prev_t not in CORP_STOPWORDS:
                     anchors.append(f"{prev_t}_{tok}")
-
-    # 2. Extract distinctive landmark word bigrams (crucial for India & non-numeric addresses)
-    info_words = [t for t in tokens if len(t) >= 3 and not t.isdigit() and t not in ADDR_STOPWORDS and t not in CORP_STOPWORDS]
-    if len(anchors) == 0 and len(info_words) >= 2:
-        for j in range(min(len(info_words) - 1, 3)):
-            anchors.append(f"lm_{info_words[j]}_{info_words[j+1]}")
-    elif len(info_words) >= 2:
-        anchors.append(f"lm_{info_words[0]}_{info_words[1]}")
 
     return anchors
