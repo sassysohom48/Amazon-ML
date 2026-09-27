@@ -46,18 +46,22 @@ from src.feature_engineering import FeatureExtractor, FEATURE_NAMES
 
 
 def run_full_inference(
+    chunk_size: int = 50000,
     batch_size: int = 100000,
     max_k_candidates: int = 50,
+    max_score_candidates: int = 35,
     model_dir: Path = MODELS_DIR,
 ):
     """
     Executes full test set inference and generates compliant submission TSVs.
-    Processes country-by-country (France, India, US) with strict memory bounds (< 1.5 GB).
+    Processes country-by-country (France, India, US) in memory-safe 50k entity chunks (< 600 MB RAM)
+    with instant per-country disk checkpointing and automatic resumption.
     """
     print("=" * 85)
     print("🚀 PHASE 6: FULL MULTI-SCALE TEST INFERENCE & SUBMISSION GENERATION")
     print("=" * 85)
     t_start = time.time()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Calibrated Models & Decision Configuration
     config_path = model_dir / "phase5_calibration_config.json"
@@ -109,26 +113,45 @@ def run_full_inference(
     total_s1 = len(all_s1_ids)
     print(f"Loaded {total_s1:,} Test Source 1 entities in {time.time() - t0:.2f}s.")
 
-    # Storage for output predictions
+    # Storage for output predictions across all countries
     s1_to_candidates: Dict[str, List[str]] = {}
     s1_to_matches: Dict[str, List[str]] = {}
-
-    countries = ["France", "India", "US"]
     total_candidate_pairs_scored = 0
 
-    # 3. Country-by-Country Partitioned Processing
+    countries = ["France", "India", "US"]
+
+    # 3. Country-by-Country Partitioned Processing with Chunking & Checkpointing
     for country in countries:
         print("\n" + "=" * 80)
         print(f"🌍 PROCESSING PARTITION: {country.upper()}")
         print("=" * 80)
         t_country = time.time()
 
+        checkpoint_file = OUTPUT_DIR / f"test_preds_{country}.parquet"
+
+        # Check for completed checkpoint
+        if checkpoint_file.exists():
+            print(f"  [CHECKPOINT FOUND] Loading existing predictions for {country} from {checkpoint_file.name}...")
+            cp_df = pl.read_parquet(checkpoint_file)
+            for row in cp_df.iter_rows(named=True):
+                eid = str(row["source1_entity_id"])
+                c_str = str(row["candidate_ids"] or "")
+                m_str = str(row["matched_ids"] or "")
+                c_list = [x.strip() for x in c_str.split(",") if x.strip()] if c_str else []
+                m_list = [x.strip() for x in m_str.split(",") if x.strip()] if m_str else []
+                s1_to_candidates[eid] = c_list
+                s1_to_matches[eid] = m_list
+                total_candidate_pairs_scored += len(c_list)
+            print(f"  [OK] Successfully loaded {len(cp_df):,} entities for {country} from checkpoint.")
+            continue
+
         # Slice country S1
         s1_country = s1_test.filter(pl.col("country") == country)
         s1_c_ids = s1_country["entity_id"].to_list()
-        print(f"  • S1 Entities in {country}: {len(s1_c_ids):,}")
+        n_s1_country = len(s1_c_ids)
+        print(f"  • S1 Entities in {country}: {n_s1_country:,}")
 
-        if len(s1_c_ids) == 0:
+        if n_s1_country == 0:
             continue
 
         # Load S2 and S3 for this country only
@@ -157,104 +180,121 @@ def run_full_inference(
         blocker.fit(s2_country, s3_country)
         print(f"  • Blocker index built in {time.time() - t_block_fit:.2f}s.")
 
-        # Generate candidates for S1
-        print(f"  • Blocking {len(s1_c_ids):,} entities...")
-        t_block = time.time()
-        cands_dict = blocker.block_dataframe(s1_country, max_k=max_k_candidates)
-        print(f"  • Blocking completed in {time.time() - t_block:.2f}s ({len(s1_c_ids)/(time.time() - t_block):,.0f} ent/s).")
-
-        # Collect needed target IDs and format candidate lists
-        flat_pairs: List[Tuple[str, str, Dict[str, Any]]] = []
-        needed_target_ids: Set[str] = set()
-
-        for s1_id, c_list in cands_dict.items():
-            tgt_list = [c["target_id"] for c in c_list]
-            s1_to_candidates[s1_id] = tgt_list
-            for c in c_list:
-                tgt_id = c["target_id"]
-                prov_dict = {k: c[k] for k in c if k != "target_id"}
-                flat_pairs.append((s1_id, tgt_id, prov_dict))
-                needed_target_ids.add(tgt_id)
-
-        print(f"  • Candidate Pairs to score in {country}: {len(flat_pairs):,} ({len(needed_target_ids):,} unique targets).")
-        total_candidate_pairs_scored += len(flat_pairs)
-
-        # Build lazy target record lookup cache
-        print(f"  • Caching {len(needed_target_ids):,} active target records in memory...")
-        s2_filtered = s2_country.filter(pl.col("entity_id").is_in(needed_target_ids))
-        s3_filtered = s3_country.filter(pl.col("entity_id").is_in(needed_target_ids))
-        del s2_country, s3_country, blocker
-        gc.collect()
-
-        s1_records = {row["entity_id"]: row for row in s1_country.iter_rows(named=True)}
-        s2_records = {row["entity_id"]: row for row in s2_filtered.iter_rows(named=True)}
-        s3_records = {row["entity_id"]: row for row in s3_filtered.iter_rows(named=True)}
-        tgt_records = {**s2_records, **s3_records}
-        del s2_filtered, s3_filtered, s2_records, s3_records
-        gc.collect()
-
-        # Batch Feature Extraction & Scoring
-        print(f"  • Extracting {len(FEATURE_NAMES)} features and predicting probabilities in batches of {batch_size:,}...")
         extractor = FeatureExtractor(idf_computer=idf_comp)
-        s1_scored_candidates: Dict[str, List[Tuple[str, float, str]]] = defaultdict(list)
-        t_score = time.time()
 
-        for idx in range(0, len(flat_pairs), batch_size):
-            chunk = flat_pairs[idx : idx + batch_size]
-            feat_rows = []
-            for s1_id, tgt_id, prov in chunk:
-                s1_rec = s1_records.get(s1_id, {})
-                tgt_rec = tgt_records.get(tgt_id, {})
-                feat_rows.append(extractor.extract_pair_features(s1_rec, tgt_rec, prov))
-
-            X_chunk = np.array(feat_rows, dtype=np.float32)
-            p_lgb_chunk = lgb_model.predict(X_chunk)
-
-            if cb_model is not None and cb_weight > 0:
-                p_cb_chunk = cb_model.predict_proba(X_chunk)[:, 1]
-                p_chunk = lgb_weight * p_lgb_chunk + cb_weight * p_cb_chunk
-            else:
-                p_chunk = p_lgb_chunk
-
-            for (s1_id, tgt_id, _), prob in zip(chunk, p_chunk):
-                tgt_src = "S2" if tgt_id.startswith("S2") else "S3"
-                s1_scored_candidates[s1_id].append((tgt_id, float(prob), tgt_src))
-
-            if (idx // batch_size) % 5 == 0 or idx + batch_size >= len(flat_pairs):
-                speed = min(idx + batch_size, len(flat_pairs)) / (time.time() - t_score)
-                print(f"    Scored {min(idx + batch_size, len(flat_pairs)):,} / {len(flat_pairs):,} pairs ({speed:,.0f} pairs/s)...")
-
-        print(f"  • Scoring completed in {time.time() - t_score:.2f}s.")
-
-        # Apply Calibrated Dynamic Thresholds & Margin Filter
+        # Country threshold parameters
         c_th_default = country_ths.get(country, global_th)
         c_source_dict = country_source_ths.get(country, {})
 
-        for s1_id in s1_c_ids:
-            scored_list = s1_scored_candidates.get(s1_id, [])
-            if not scored_list:
-                s1_to_matches[s1_id] = []
-                continue
+        country_eids = []
+        country_cand_strs = []
+        country_match_strs = []
 
-            # Sort candidates by probability descending
-            scored_list.sort(key=lambda x: x[1], reverse=True)
-            top_prob = scored_list[0][1]
+        # Process S1 entities in memory-safe chunks (e.g. 50,000 entities per chunk)
+        for chunk_start in range(0, n_s1_country, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, n_s1_country)
+            s1_chunk_df = s1_country.slice(chunk_start, chunk_end - chunk_start)
+            chunk_s1_ids = s1_chunk_df["entity_id"].to_list()
+            print(f"\n  [Chunk {chunk_start//chunk_size + 1}] Processing {len(chunk_s1_ids):,} entities ({chunk_start:,} to {chunk_end:,} / {n_s1_country:,})...")
 
-            matched = []
-            for rank_idx, (tgt_id, p, tgt_src) in enumerate(scored_list):
-                # Specific threshold for (country, source) or country default
-                req_th = c_source_dict.get(tgt_src, c_th_default)
+            # 1. Block candidates for chunk
+            t_chunk_block = time.time()
+            cands_dict = blocker.block_dataframe(s1_chunk_df, max_k=max_k_candidates)
+            print(f"    • Blocked {len(chunk_s1_ids):,} entities in {time.time() - t_chunk_block:.2f}s.")
 
-                if p >= req_th:
-                    # Margin gap suppression for secondary candidates
-                    if rank_idx > 0 and (top_prob - p) > margin_gap:
-                        continue
-                    matched.append(tgt_id)
+            # 2. Collect flat pairs to score and target IDs for this chunk only
+            needed_target_ids = set()
+            flat_pairs: List[Tuple[str, str, Dict[str, Any]]] = []
 
-            s1_to_matches[s1_id] = matched
+            for s1_id in chunk_s1_ids:
+                c_list = cands_dict.get(s1_id, [])
+                tgt_list = [c["target_id"] for c in c_list]
+                s1_to_candidates[s1_id] = tgt_list
+                country_eids.append(s1_id)
+                country_cand_strs.append(",".join(tgt_list))
+                total_candidate_pairs_scored += len(tgt_list)
 
-        # Explicit RAM cleanup
-        del s1_records, tgt_records, flat_pairs, s1_scored_candidates, cands_dict, extractor, idf_comp
+                # Score top N candidates with model
+                for c in c_list[:max_score_candidates]:
+                    tgt_id = c["target_id"]
+                    prov_dict = {k: c[k] for k in c if k != "target_id"}
+                    flat_pairs.append((s1_id, tgt_id, prov_dict))
+                    needed_target_ids.add(tgt_id)
+
+            # 3. Lazy target lookup cache for this chunk only (< 100 MB RAM)
+            s2_chunk_targets = s2_country.filter(pl.col("entity_id").is_in(needed_target_ids))
+            s3_chunk_targets = s3_country.filter(pl.col("entity_id").is_in(needed_target_ids))
+
+            s1_records = {row["entity_id"]: row for row in s1_chunk_df.iter_rows(named=True)}
+            s2_records = {row["entity_id"]: row for row in s2_chunk_targets.iter_rows(named=True)}
+            s3_records = {row["entity_id"]: row for row in s3_chunk_targets.iter_rows(named=True)}
+            tgt_records = {**s2_records, **s3_records}
+            del s2_chunk_targets, s3_chunk_targets, s2_records, s3_records
+
+            # 4. Batch feature extraction and prediction
+            s1_scored_candidates: Dict[str, List[Tuple[str, float, str]]] = defaultdict(list)
+            t_score = time.time()
+
+            for idx in range(0, len(flat_pairs), batch_size):
+                sub_chunk = flat_pairs[idx : idx + batch_size]
+                feat_rows = []
+                for s1_id, tgt_id, prov in sub_chunk:
+                    s1_rec = s1_records.get(s1_id, {})
+                    tgt_rec = tgt_records.get(tgt_id, {})
+                    feat_rows.append(extractor.extract_pair_features(s1_rec, tgt_rec, prov))
+
+                X_chunk = np.array(feat_rows, dtype=np.float32)
+                p_lgb_chunk = lgb_model.predict(X_chunk)
+
+                if cb_model is not None and cb_weight > 0:
+                    p_cb_chunk = cb_model.predict_proba(X_chunk)[:, 1]
+                    p_chunk = lgb_weight * p_lgb_chunk + cb_weight * p_cb_chunk
+                else:
+                    p_chunk = p_lgb_chunk
+
+                for (s1_id, tgt_id, _), prob in zip(sub_chunk, p_chunk):
+                    tgt_src = "S2" if tgt_id.startswith("S2") else "S3"
+                    s1_scored_candidates[s1_id].append((tgt_id, float(prob), tgt_src))
+
+            # 5. Apply thresholds & margin filter for chunk
+            for s1_id in chunk_s1_ids:
+                scored_list = s1_scored_candidates.get(s1_id, [])
+                if not scored_list:
+                    s1_to_matches[s1_id] = []
+                    country_match_strs.append("")
+                    continue
+
+                scored_list.sort(key=lambda x: x[1], reverse=True)
+                top_prob = scored_list[0][1]
+
+                matched = []
+                for rank_idx, (tgt_id, p, tgt_src) in enumerate(scored_list):
+                    req_th = c_source_dict.get(tgt_src, c_th_default)
+                    if p >= req_th:
+                        if rank_idx > 0 and (top_prob - p) > margin_gap:
+                            continue
+                        matched.append(tgt_id)
+
+                s1_to_matches[s1_id] = matched
+                country_match_strs.append(",".join(matched))
+
+            print(f"    • Scored {len(flat_pairs):,} candidate pairs in {time.time() - t_score:.2f}s ({len(flat_pairs)/(time.time() - t_score):,.0f} pairs/s).")
+
+            # Cleanup chunk memory
+            del s1_records, tgt_records, flat_pairs, s1_scored_candidates, cands_dict
+            gc.collect()
+
+        # 6. Save checkpoint parquet for this country immediately
+        country_checkpoint_df = pl.DataFrame({
+            "source1_entity_id": country_eids,
+            "candidate_ids": country_cand_strs,
+            "matched_ids": country_match_strs,
+        })
+        country_checkpoint_df.write_parquet(checkpoint_file)
+        print(f"\n[OK] Saved country checkpoint to {checkpoint_file.name} ({len(country_checkpoint_df):,} entities).")
+
+        # Free country level memory
+        del s2_country, s3_country, blocker, country_eids, country_cand_strs, country_match_strs, country_checkpoint_df
         gc.collect()
         print(f"  Partition {country} finished in {time.time() - t_country:.2f}s.")
 
