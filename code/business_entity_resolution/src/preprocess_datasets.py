@@ -209,19 +209,40 @@ def preprocess_tsv_file_streaming(
     print(f"Finished {output_parquet_path.name} ({total_processed:,} rows, {file_size_mb:.2f} MB) in {time.time() - start_time:.2f}s.")
 
 
+<<<<<<< Updated upstream
 def run_full_preprocessing(force_recompute: bool = False):
     print("=" * 75)
     print("PHASE 2: MULTI-REPRESENTATION LOW-MEMORY STREAMING PREPROCESSING")
     print("=" * 75)
+=======
+def run_full_preprocessing(test_only: bool = False, train_only: bool = False):
+    print("=" * 70)
+    print("PHASE 2: LOW-MEMORY STREAMING PREPROCESSING")
+    print("=" * 70)
+>>>>>>> Stashed changes
 
-    jobs = [
-        (TRAIN_S1, PROCESSED_DIR / "train_source1_cleaned.parquet"),
-        (TRAIN_S2, PROCESSED_DIR / "train_source2_cleaned.parquet"),
-        (TRAIN_S3, PROCESSED_DIR / "train_source3_cleaned.parquet"),
-        (TEST_S1, PROCESSED_DIR / "test_source1_cleaned.parquet"),
-        (TEST_S2, PROCESSED_DIR / "test_source2_cleaned.parquet"),
-        (TEST_S3, PROCESSED_DIR / "test_source3_cleaned.parquet"),
-    ]
+    if test_only:
+        jobs = [
+            (TEST_S1, PROCESSED_DIR / "test_source1_cleaned.parquet"),
+            (TEST_S2, PROCESSED_DIR / "test_source2_cleaned.parquet"),
+            (TEST_S3, PROCESSED_DIR / "test_source3_cleaned.parquet"),
+        ]
+    elif train_only:
+        jobs = [
+            (TRAIN_S1, PROCESSED_DIR / "train_source1_cleaned.parquet"),
+            (TRAIN_S2, PROCESSED_DIR / "train_source2_cleaned.parquet"),
+            (TRAIN_S3, PROCESSED_DIR / "train_source3_cleaned.parquet"),
+        ]
+    else:
+        # Prioritize test files first so inference can be run right away
+        jobs = [
+            (TEST_S1, PROCESSED_DIR / "test_source1_cleaned.parquet"),
+            (TEST_S2, PROCESSED_DIR / "test_source2_cleaned.parquet"),
+            (TEST_S3, PROCESSED_DIR / "test_source3_cleaned.parquet"),
+            (TRAIN_S1, PROCESSED_DIR / "train_source1_cleaned.parquet"),
+            (TRAIN_S2, PROCESSED_DIR / "train_source2_cleaned.parquet"),
+            (TRAIN_S3, PROCESSED_DIR / "train_source3_cleaned.parquet"),
+        ]
 
     total_start = time.time()
     for input_tsv, output_parquet in jobs:
@@ -230,6 +251,7 @@ def run_full_preprocessing(force_recompute: bool = False):
             continue
         preprocess_tsv_file_streaming(input_tsv, output_parquet, force_recompute=force_recompute)
 
+<<<<<<< Updated upstream
     print("\n" + "=" * 75)
     print(f"ALL DATASETS PREPROCESSED SUCCESSFULLY IN {time.time() - total_start:.2f}s!")
     print("=" * 75)
@@ -238,3 +260,18 @@ def run_full_preprocessing(force_recompute: bool = False):
 if __name__ == "__main__":
     force = "--force" in sys.argv
     run_full_preprocessing(force_recompute=force)
+=======
+    print("\n" + "=" * 70)
+    print(f"DATASETS PREPROCESSED SUCCESSFULLY IN {time.time() - total_start:.2f}s!")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Streaming Preprocessor")
+    parser.add_argument("--test-only", action="store_true", help="Preprocess test files only")
+    parser.add_argument("--train-only", action="store_true", help="Preprocess train files only")
+    args = parser.parse_args()
+
+    run_full_preprocessing(test_only=args.test_only, train_only=args.train_only)
+>>>>>>> Stashed changes
