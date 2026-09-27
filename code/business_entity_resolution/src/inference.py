@@ -193,7 +193,7 @@ def run_full_inference(
         gc.collect()
 
         # Batch Feature Extraction & Scoring
-        print(f"  • Extracting 73 features and predicting probabilities in batches of {batch_size:,}...")
+        print(f"  • Extracting {len(FEATURE_NAMES)} features and predicting probabilities in batches of {batch_size:,}...")
         extractor = FeatureExtractor(idf_computer=idf_comp)
         s1_scored_candidates: Dict[str, List[Tuple[str, float, str]]] = defaultdict(list)
         t_score = time.time()
