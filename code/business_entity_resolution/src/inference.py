@@ -15,6 +15,7 @@ import time
 import json
 import subprocess
 from pathlib import Path
+from collections import defaultdict
 from typing import Dict, List, Set, Tuple, Optional, Any
 import numpy as np
 import polars as pl
