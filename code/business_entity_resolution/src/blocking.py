@@ -8,7 +8,7 @@ import time
 import gc
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, Any
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
