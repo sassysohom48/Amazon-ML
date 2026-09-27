@@ -9,20 +9,27 @@ import unicodedata
 from typing import List, Set, Tuple, Optional, Dict
 import polars as pl
 
-# Statistical non-distinctive words across corporate business names
+# Statistical non-distinctive words across corporate business names (US, India, France)
 CORP_STOPWORDS: Set[str] = {
     "the", "a", "an", "and", "of", "in", "for", "on", "at", "by", "to", "with",
     "inc", "incorporated", "corp", "corporation", "co", "company", "llc", "ltd",
-    "limited", "pvt", "private", "sa", "sarl", "sas", "eurl", "sci", "enterprise",
-    "enterprises", "service", "services", "center", "centre", "group", "international",
-    "global", "solutions", "holdings", "management", "india", "usa", "us", "france"
+    "limited", "pvt", "private", "sa", "sarl", "sas", "sasu", "eurl", "sci", "snc", "selarl",
+    "ets", "etablissement", "etablissements", "ste", "societe", "cie", "compagnie",
+    "enterprise", "enterprises", "service", "services", "center", "centre", "group",
+    "international", "global", "solutions", "holdings", "management",
+    "cabinet", "atelier", "association", "boutique", "magasin",
+    "india", "usa", "us", "france", "fr", "paris"
 }
 
-# Generic address descriptors to filter when creating anchors
+# Generic address descriptors to filter when creating anchors (US, India, France)
 ADDR_STOPWORDS: Set[str] = {
     "st", "street", "rd", "road", "ave", "avenue", "blvd", "boulevard", "dr", "drive",
     "ln", "lane", "ct", "court", "unit", "apt", "apartment", "ste", "suite", "flr", "floor",
-    "bldg", "building", "near", "opp", "opposite", "behind", "door", "flat", "no", "h"
+    "bldg", "building", "near", "opp", "opposite", "behind", "door", "flat", "no", "h",
+    # French address keywords to prevent generic anchor collisions (e.g. 12_rue)
+    "rue", "route", "impasse", "allee", "place", "voie", "chemin", "passage",
+    "cours", "quai", "residence", "res", "bat", "batiment", "cedex",
+    "arrondissement", "boite", "postale", "bp"
 }
 
 # Corporate suffix stem mappings to harmonize variations (e.g. advisory -> advis)
@@ -38,7 +45,9 @@ STEM_SUFFIXES = [
     ("holdings", "hold"), ("holding", "hold"),
     ("properties", "propert"), ("property", "propert"),
     ("bakeries", "baker"), ("bakery", "baker"),
-    ("jewellers", "jewel"), ("jewelers", "jewel"), ("jewellery", "jewel"), ("jewelry", "jewel")
+    ("jewellers", "jewel"), ("jewelers", "jewel"), ("jewellery", "jewel"), ("jewelry", "jewel"),
+    ("etablissements", "etabliss"), ("etablissement", "etabliss"),
+    ("societes", "societ"), ("societe", "societ")
 ]
 
 # Fast Soundex mapping table

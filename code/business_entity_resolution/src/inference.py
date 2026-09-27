@@ -63,11 +63,12 @@ def count_tsv_rows(path: Path) -> int:
 def run_full_inference(
     threshold_override: Optional[float] = None,
     batch_size: int = 100000,
-    num_workers: int = 4
+    num_workers: int = 6,
+    force_recompute: bool = False
 ) -> Tuple[Path, Path]:
     """
     Executes end-to-end checkpointed streaming inference across all test countries (US, India, France).
-    Automatically skips completed country partitions and resumes where it left off.
+    Automatically skips completed country partitions and resumes where it left off (or recomputes if force_recompute=True).
     """
     start_total = time.time()
     print("=" * 85)
@@ -86,11 +87,13 @@ def run_full_inference(
 
     if threshold_override is not None:
         tau = threshold_override
+    elif os.getenv("MATCH_THRESHOLD"):
+        tau = float(os.getenv("MATCH_THRESHOLD"))
     elif threshold_path.exists():
         with open(threshold_path, "r", encoding="utf-8") as f:
             tau = float(f.read().strip())
     else:
-        tau = 0.78  # Calibrated default
+        tau = 0.74  # Calibrated default for high-recall test inference
 
     print(f"Applied Calibrated Match Threshold: τ* = {tau:.4f}")
 
@@ -120,12 +123,18 @@ def run_full_inference(
         country_match_path = OUTPUT_DIR / f"matching_results_{country}.tsv"
         country_cand_path = OUTPUT_DIR / f"candidate_pairs_{country}.tsv"
 
-        # Checkpoint verification: if country already fully processed, skip!
-        existing_rows = count_tsv_rows(country_match_path)
-        if existing_rows >= n_country_s1:
-            print(f"✅ Checkpoint Found: [{country}] is already fully completed ({existing_rows:,} rows).")
-            print(f"   Skipping [{country}] and reusing existing results -> {country_match_path.name}")
-            continue
+        # Checkpoint verification: if country already fully processed, skip (unless force_recompute=True)
+        if not force_recompute:
+            existing_rows = count_tsv_rows(country_match_path)
+            if existing_rows >= n_country_s1:
+                print(f"✅ Checkpoint Found: [{country}] is already fully completed ({existing_rows:,} rows).")
+                print(f"   Skipping [{country}] and reusing existing results -> {country_match_path.name}")
+                continue
+        else:
+            if country_match_path.exists():
+                country_match_path.unlink()
+            if country_cand_path.exists():
+                country_cand_path.unlink()
 
         print(f"[{country}] Starting inference for {n_country_s1:,} S1 entities...")
 

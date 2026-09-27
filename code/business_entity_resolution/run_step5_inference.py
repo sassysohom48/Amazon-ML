@@ -5,6 +5,7 @@ generate matching_results.tsv and candidate_pairs.tsv, and run validate_submissi
 """
 
 import sys
+import argparse
 from pathlib import Path
 
 # Add current directory to path
@@ -15,5 +16,17 @@ if str(current_dir) not in sys.path:
 from src.inference import run_full_inference
 
 if __name__ == "__main__":
-    print("Launching Step 5: Full Test Inference & Submission Generation...")
-    run_full_inference()
+    parser = argparse.ArgumentParser(description="Step 5: Full Test Inference & Submission Generation")
+    parser.add_argument("--force", "-f", action="store_true", help="Force recomputation of all countries (ignore existing checkpoints)")
+    parser.add_argument("--threshold", "-t", type=float, default=None, help="Decision threshold override (e.g. 0.74)")
+    parser.add_argument("--workers", "-w", type=int, default=6, help="Number of parallel worker processes (default: 6)")
+    parser.add_argument("--batch-size", "-b", type=int, default=100000, help="Batch size for entity streaming (default: 100,000)")
+    args = parser.parse_args()
+
+    print(f"Launching Step 5: Full Test Inference & Submission Generation (force={args.force}, threshold={args.threshold}, workers={args.workers})...")
+    run_full_inference(
+        threshold_override=args.threshold,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        force_recompute=args.force
+    )
