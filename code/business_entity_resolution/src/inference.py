@@ -12,6 +12,7 @@ Streams all test records across US, India, and France using:
 import os
 import sys
 import gc
+import json
 import time
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
@@ -75,9 +76,10 @@ def run_full_inference(
     print("  AMAZON ML CHALLENGE 2026: PHASE 7 CHECKPOINTED STREAMING INFERENCE")
     print("=" * 85)
 
-    # 1. Load Trained Model & Calibrated Optimal Threshold
+    # 1. Load Trained Model(s) & Calibrated Optimal Thresholds
     model_path = MODELS_DIR / "lgbm_model.txt"
     threshold_path = MODELS_DIR / "optimal_threshold.txt"
+    threshold_json_path = MODELS_DIR / "optimal_thresholds.json"
 
     if not model_path.exists():
         raise FileNotFoundError(f"Trained model not found at {model_path}. Run Step 4 first.")
@@ -85,17 +87,41 @@ def run_full_inference(
     print(f"Loading trained LightGBM booster from: {model_path.name}")
     booster = lgb.Booster(model_file=str(model_path))
 
-    if threshold_override is not None:
-        tau = threshold_override
-    elif os.getenv("MATCH_THRESHOLD"):
-        tau = float(os.getenv("MATCH_THRESHOLD"))
+    # Optional CatBoost ensemble loading
+    cat_model = None
+    cat_path = MODELS_DIR / "catboost_model.cbm"
+    if cat_path.exists():
+        try:
+            from catboost import CatBoostClassifier
+            cat_model = CatBoostClassifier()
+            cat_model.load_model(str(cat_path))
+            print(f"Loaded trained CatBoost booster for ensemble blending -> {cat_path.name}")
+        except Exception as e:
+            print(f"Notice: CatBoost model found but could not be loaded ({e}). Proceeding with pure LightGBM booster.")
+
+    # Determine default and calibrated thresholds
+    country_thresholds = {
+        "US": 0.75,
+        "INDIA": 0.70,
+        "FRANCE": 0.71,
+        "GLOBAL": 0.74
+    }
+    if threshold_json_path.exists():
+        try:
+            with open(threshold_json_path, "r", encoding="utf-8") as f:
+                loaded_thresholds = json.load(f)
+                country_thresholds.update(loaded_thresholds)
+                print(f"Loaded calibrated country thresholds: {country_thresholds}")
+        except Exception as e:
+            print(f"Notice: Could not parse {threshold_json_path.name} ({e}), using default country calibrations.")
     elif threshold_path.exists():
         with open(threshold_path, "r", encoding="utf-8") as f:
-            tau = float(f.read().strip())
-    else:
-        tau = 0.74  # Calibrated default for high-recall test inference
+            global_tau = float(f.read().strip())
+            country_thresholds["GLOBAL"] = global_tau
+            print(f"Loaded global calibrated threshold: {global_tau:.4f}")
 
-    print(f"Applied Calibrated Match Threshold: τ* = {tau:.4f}")
+    if threshold_override is not None:
+        print(f"Global Match Threshold Override: τ* = {threshold_override:.4f}")
 
     # 2. Check and Ingest Test Partitions
     countries = ensure_test_partitions_exist()
@@ -136,7 +162,14 @@ def run_full_inference(
             if country_cand_path.exists():
                 country_cand_path.unlink()
 
-        print(f"[{country}] Starting inference for {n_country_s1:,} S1 entities...")
+        if threshold_override is not None:
+            country_tau = threshold_override
+        elif os.getenv("MATCH_THRESHOLD"):
+            country_tau = float(os.getenv("MATCH_THRESHOLD"))
+        else:
+            country_tau = country_thresholds.get(country, country_thresholds.get("GLOBAL", 0.74))
+
+        print(f"[{country}] Starting inference for {n_country_s1:,} S1 entities (Applied τ* = {country_tau:.4f})...")
 
         df_s2 = pl.read_parquet(p_s2).select(["entity_id", "business_name", "business_address"]) if p_s2.exists() else pl.DataFrame()
         df_s3 = pl.read_parquet(p_s3).select(["entity_id", "business_name", "business_address"]) if p_s3.exists() else pl.DataFrame()
@@ -217,10 +250,15 @@ def run_full_inference(
                         gt_map=None
                     )
                     X_batch = df_feat.select(FEATURE_COLS).to_numpy()
-                    probs = booster.predict(X_batch)
+                    probs_lgb = booster.predict(X_batch)
+                    if cat_model is not None:
+                        probs_cat = cat_model.predict_proba(X_batch)[:, 1]
+                        probs = 0.55 * probs_lgb + 0.45 * probs_cat
+                    else:
+                        probs = probs_lgb
 
                     for sid, tid, prob in zip(pair_s1_ids, pair_target_ids, probs):
-                        if prob >= tau:
+                        if prob >= country_tau:
                             b_matches_dict[sid].append(tid)
 
                 # D. Stream-write batch rows immediately to country checkpoint

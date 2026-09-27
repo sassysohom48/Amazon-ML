@@ -10,4 +10,5 @@ scipy>=1.12.0
 
 # Machine Learning & Modeling
 lightgbm>=4.3.0
+catboost>=1.2.0
 pypdf>=4.0.0

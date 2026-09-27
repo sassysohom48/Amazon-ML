@@ -16,7 +16,7 @@ from .config import (
 )
 from .normalizer import clean_text, extract_char_3grams, extract_soundex, RE_DIGITS
 
-# Canonical feature schema produced by this module
+# Canonical feature schema produced by this module (25 features)
 FEATURE_COLS: List[str] = [
     "candidate_rank",
     "name_levenshtein",
@@ -29,12 +29,16 @@ FEATURE_COLS: List[str] = [
     "name_len_ratio",
     "name_exact_match",
     "name_soundex_match",
+    "name_head_token_match",
+    "name_acronym_match",
+    "name_word_count_diff",
     "has_s1_address",
     "has_target_address",
     "addr_both_present",
     "addr_token_jaccard",
     "addr_token_overlap",
     "addr_numeric_match",
+    "addr_numeric_conflict",
     "addr_levenshtein",
     "addr_token_sort",
     "is_source2",
@@ -69,9 +73,9 @@ def build_pairwise_features(
     """
     Computes vectorized SIMD pairwise features across candidate pairs:
     - RapidFuzz name similarities (Levenshtein, Jaro-Winkler, Token Sort, Token Set, Partial)
-    - Character 3-gram Jaccard
+    - Character 3-gram Jaccard, Head token match, and Acronym match
     - Address word-token Jaccard & overlap coefficient
-    - Address numeric token intersection (PINs & house numbers)
+    - Address numeric token intersection & numeric conflict penalty
     - Missingness flags & provenance ranks
     """
     n_pairs = len(s1_ids)
@@ -89,6 +93,9 @@ def build_pairwise_features(
     f_name_len_ratio = np.zeros(n_pairs, dtype=np.float32)
     f_name_exact = np.zeros(n_pairs, dtype=np.float32)
     f_name_soundex = np.zeros(n_pairs, dtype=np.float32)
+    f_name_head = np.zeros(n_pairs, dtype=np.float32)
+    f_name_acronym = np.zeros(n_pairs, dtype=np.float32)
+    f_name_word_diff = np.zeros(n_pairs, dtype=np.float32)
 
     f_has_s1_addr = np.zeros(n_pairs, dtype=np.float32)
     f_has_target_addr = np.zeros(n_pairs, dtype=np.float32)
@@ -96,6 +103,7 @@ def build_pairwise_features(
     f_addr_token_jaccard = np.zeros(n_pairs, dtype=np.float32)
     f_addr_token_overlap = np.zeros(n_pairs, dtype=np.float32)
     f_addr_numeric_match = np.zeros(n_pairs, dtype=np.float32)
+    f_addr_numeric_conflict = np.zeros(n_pairs, dtype=np.float32)
     f_addr_lev = np.zeros(n_pairs, dtype=np.float32)
     f_addr_sort = np.zeros(n_pairs, dtype=np.float32)
 
@@ -139,6 +147,23 @@ def build_pairwise_features(
         sx2 = extract_soundex(w2)
         f_name_soundex[i] = 1.0 if (sx1 and sx1 == sx2) else 0.0
 
+        # Head word (primary brand) match
+        if w1 and w1 == w2:
+            f_name_head[i] = 1.0
+        elif w1 and w2 and fuzz.ratio(w1, w2) >= 85:
+            f_name_head[i] = 0.85
+
+        # Acronym & Word Count Differences
+        words1 = [w for w in n1.split() if len(w) >= 2]
+        words2 = [w for w in n2.split() if len(w) >= 2]
+        f_name_word_diff[i] = abs(len(words1) - len(words2))
+        clean_c1 = n1.replace(" ", "")
+        clean_c2 = n2.replace(" ", "")
+        acr1 = "".join(w[0] for w in words1) if len(words1) >= 2 else ""
+        acr2 = "".join(w[0] for w in words2) if len(words2) >= 2 else ""
+        if (clean_c1 and clean_c1 == acr2 and len(clean_c1) >= 2) or (clean_c2 and clean_c2 == acr1 and len(clean_c2) >= 2):
+            f_name_acronym[i] = 1.0
+
         # 2. Address Features
         has_a1 = len(a1) > 0
         has_a2 = len(a2) > 0
@@ -161,6 +186,8 @@ def build_pairwise_features(
             if d1 and d2:
                 inter_d = len(d1 & d2)
                 f_addr_numeric_match[i] = inter_d / max(len(d1 | d2), 1)
+                if inter_d == 0:
+                    f_addr_numeric_conflict[i] = 1.0  # Explicit conflicting street number/PIN penalty
 
             f_addr_lev[i] = fuzz.ratio(a1, a2) / 100.0
             f_addr_sort[i] = fuzz.token_sort_ratio(a1, a2) / 100.0
@@ -193,12 +220,16 @@ def build_pairwise_features(
         "name_len_ratio": f_name_len_ratio,
         "name_exact_match": f_name_exact,
         "name_soundex_match": f_name_soundex,
+        "name_head_token_match": f_name_head,
+        "name_acronym_match": f_name_acronym,
+        "name_word_count_diff": f_name_word_diff,
         "has_s1_address": f_has_s1_addr,
         "has_target_address": f_has_target_addr,
         "addr_both_present": f_addr_both,
         "addr_token_jaccard": f_addr_token_jaccard,
         "addr_token_overlap": f_addr_token_overlap,
         "addr_numeric_match": f_addr_numeric_match,
+        "addr_numeric_conflict": f_addr_numeric_conflict,
         "addr_levenshtein": f_addr_lev,
         "addr_token_sort": f_addr_sort,
         "is_source2": f_is_s2,
